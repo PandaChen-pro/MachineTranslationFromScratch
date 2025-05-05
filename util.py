@@ -20,10 +20,10 @@ def save_checkpoint(state, is_best, checkpoint_dir, filename='checkpoint.pt'):
     torch.save(state, os.path.join(checkpoint_dir, filename))
     # 如果是最佳模型，复制一份
     if is_best:
-        shutil.copyfile(
-            os.path.join(checkpoint_dir, filename),
-            os.path.join(checkpoint_dir, 'best_model.pt')
-        )
+        best_path = os.path.join(checkpoint_dir, 'best_model.pt')
+        # 只有当路径不同时才复制文件
+        if checkpoint_path != best_path:
+            shutil.copyfile(checkpoint_path, best_path)
         
 def load_checkpoint(checkpoint_dir, filename='checkpoint.pt'):
     """加载检查点"""
