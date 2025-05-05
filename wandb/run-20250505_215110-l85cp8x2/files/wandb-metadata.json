@@ -1,7 +1,7 @@
 {
   "os": "Linux-5.19.0-50-generic-x86_64-with-glibc2.35",
   "python": "CPython 3.10.14",
-  "startedAt": "2025-05-05T09:03:28.776918Z",
+  "startedAt": "2025-05-05T13:51:10.921346Z",
   "args": [
     "--mode",
     "train",
@@ -12,7 +12,7 @@
   "codePath": "start.py",
   "git": {
     "remote": "https://github.com/PandaChen-pro/MachineTranslationFromScratch.git",
-    "commit": "9d4305fd11855a18aa4114046b9d4ba5b3080642"
+    "commit": "21b854e467e85b5cb7b88324fc0106e99631ec48"
   },
   "email": "lqcfcjx@gmail.com",
   "root": "/data/coding/MachineTranslationFromScratch",
@@ -26,7 +26,7 @@
   "disk": {
     "/": {
       "total": "32186826752",
-      "used": "21614690304"
+      "used": "21612941312"
     }
   },
   "memory": {

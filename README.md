@@ -21,7 +21,7 @@ python start.py --mode train --resume_training --resume_wandb
 ```
 快速评估：
 ```shell
-python start.py --mode train --resume_training --resume_wandb --fast_eval
+python start.py --mode train --resume_training --resume_wandb --fast_eval --use_wandb
 ```
 ## 测试集上评估
 ```shell
