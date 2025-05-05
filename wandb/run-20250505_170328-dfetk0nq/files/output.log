@@ -1,0 +1,4 @@
+Starting training...
+Epoch 1:   0%|                                                                                           | 0/1250 [00:00<?, ?it/s]/data/miniconda/envs/torch/lib/python3.10/site-packages/torch/nn/functional.py:5137: UserWarning: Support for mismatched key_padding_mask and attn_mask is deprecated. Use same type for both instead.
+  warnings.warn(
+Epoch 1:   2%|█▎                                                                     | 23/1250 [00:11<10:10,  2.01it/s, loss=7.92]

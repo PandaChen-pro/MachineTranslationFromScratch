@@ -1,0 +1,48 @@
+{
+  "os": "Linux-5.19.0-50-generic-x86_64-with-glibc2.35",
+  "python": "CPython 3.10.14",
+  "startedAt": "2025-05-05T09:03:28.776918Z",
+  "args": [
+    "--mode",
+    "train",
+    "--fast_eval",
+    "--use_wandb"
+  ],
+  "program": "/data/coding/MachineTranslationFromScratch/start.py",
+  "codePath": "start.py",
+  "git": {
+    "remote": "https://github.com/PandaChen-pro/MachineTranslationFromScratch.git",
+    "commit": "9d4305fd11855a18aa4114046b9d4ba5b3080642"
+  },
+  "email": "lqcfcjx@gmail.com",
+  "root": "/data/coding/MachineTranslationFromScratch",
+  "host": "igjvytnihlrifcit-snow-7d8867dc57-q5x5z",
+  "executable": "/data/miniconda/envs/torch/bin/python",
+  "codePathLocal": "start.py",
+  "cpu_count": 24,
+  "cpu_count_logical": 48,
+  "gpu": "Tesla P4",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "32186826752",
+      "used": "21614690304"
+    }
+  },
+  "memory": {
+    "total": "135055372288"
+  },
+  "cpu": {
+    "count": 24,
+    "countLogical": 48
+  },
+  "gpu_nvidia": [
+    {
+      "name": "Tesla P4",
+      "memoryTotal": "8589934592",
+      "cudaCores": 2560,
+      "architecture": "Pascal"
+    }
+  ],
+  "cudaVersion": "12.4"
+}

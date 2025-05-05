@@ -16,6 +16,8 @@ from model import TransformerModel
 from trainer import Trainer
 from util import set_seed, write_translations, get_device, count_parameters
 
+wandb.login()
+
 def parse_args():
     parser = argparse.ArgumentParser(description='中英神经机器翻译')
     

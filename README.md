@@ -12,7 +12,7 @@ python start.py --mode train --src_file ./data/chinese.txt --tgt_file ./data/eng
 ```
 快速评估：
 ```shell
-python start.py --mode train --fast_eval
+python start.py --mode train --fast_eval --use_wandb
 python start.py --mode train --fast_eval --fast_eval_size 100
 ```
 ## 恢复中断训练
