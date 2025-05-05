@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import torch.nn.utils.rnn as rnn_utils
 import os
+import random
 
 class Vocabulary:
     def __init__(self, pad_token="<pad>", unk_token="<unk>", 
@@ -89,30 +90,22 @@ class Vocabulary:
         return vocab
 
 class TranslationDataset(Dataset):
-    def __init__(self, src_file, tgt_file=None, max_len=100):
+    def __init__(self, src_sentences, tgt_sentences=None, max_len=100):
         """
         初始化翻译数据集
         
         Args:
-            src_file: 源语言文件路径
-            tgt_file: 目标语言文件路径，如果为None，则为测试集
+            src_sentences: 源语言句子列表
+            tgt_sentences: 目标语言句子列表，如果为None，则为测试集
             max_len: 最大序列长度
         """
-        self.src_sentences = self.read_file(src_file)
-        self.tgt_sentences = self.read_file(tgt_file) if tgt_file else None
+        self.src_sentences = src_sentences
+        self.tgt_sentences = tgt_sentences
         self.max_len = max_len
-        self.is_test = tgt_file is None
+        self.is_test = tgt_sentences is None
         
         if not self.is_test:
             assert len(self.src_sentences) == len(self.tgt_sentences), "源语言和目标语言句子数量不匹配"
-            
-    def read_file(self, file_path):
-        """读取文本文件"""
-        if file_path is None:
-            return None
-        
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return [line.strip() for line in f]
             
     def __len__(self):
         return len(self.src_sentences)
@@ -134,6 +127,62 @@ class TranslationDataset(Dataset):
                 'src_text': ' '.join(src_tokens),
                 'tgt_text': ' '.join(tgt_tokens)
             }
+
+def load_and_split_data(src_file, tgt_file, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1, seed=42):
+    """
+    加载并分割数据为训练集、验证集和测试集
+    
+    Args:
+        src_file: 源语言文件路径
+        tgt_file: 目标语言文件路径
+        train_ratio: 训练集比例
+        val_ratio: 验证集比例
+        test_ratio: 测试集比例
+        seed: 随机种子
+    
+    Returns:
+        train_src, train_tgt, val_src, val_tgt, test_src, test_tgt
+    """
+    # 确保比例之和为1
+    assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "比例之和必须为1"
+    
+    # 读取源语言和目标语言文件
+    with open(src_file, 'r', encoding='utf-8') as f:
+        src_sentences = [line.strip() for line in f]
+    
+    with open(tgt_file, 'r', encoding='utf-8') as f:
+        tgt_sentences = [line.strip() for line in f]
+    
+    # 确保数量一致
+    assert len(src_sentences) == len(tgt_sentences), "源语言和目标语言句子数量不匹配"
+    
+    # 设置随机种子
+    random.seed(seed)
+    
+    # 打乱并保持一致性
+    combined = list(zip(src_sentences, tgt_sentences))
+    random.shuffle(combined)
+    src_sentences, tgt_sentences = zip(*combined)
+    
+    # 计算数据集大小
+    total_size = len(src_sentences)
+    train_size = int(total_size * train_ratio)
+    val_size = int(total_size * val_ratio)
+    
+    # 分割数据集
+    train_src = src_sentences[:train_size]
+    train_tgt = tgt_sentences[:train_size]
+    
+    val_src = src_sentences[train_size:train_size+val_size]
+    val_tgt = tgt_sentences[train_size:train_size+val_size]
+    
+    test_src = src_sentences[train_size+val_size:]
+    test_tgt = tgt_sentences[train_size+val_size:]
+    
+    print(f"数据集分割完成，总计 {total_size} 条数据")
+    print(f"训练集: {len(train_src)} 条，验证集: {len(val_src)} 条，测试集: {len(test_src)} 条")
+    
+    return train_src, train_tgt, val_src, val_tgt, test_src, test_tgt
 
 def collate_fn(batch, src_vocab, tgt_vocab=None):
     """
@@ -171,15 +220,15 @@ def get_dataloader(dataset, batch_size, src_vocab, tgt_vocab=None, shuffle=False
         collate_fn=lambda batch: collate_fn(batch, src_vocab, tgt_vocab)
     )
 
-def build_vocabs(train_dataset, min_freq=5):
+def build_vocabs(train_src, train_tgt, min_freq=5):
     """构建源语言和目标语言的词汇表"""
     src_vocab = Vocabulary()
     tgt_vocab = Vocabulary()
     
     # 构建源语言词汇表
-    src_vocab.build_vocab([item['src_text'] for item in train_dataset], min_freq)
+    src_vocab.build_vocab(train_src, min_freq)
     
     # 构建目标语言词汇表
-    tgt_vocab.build_vocab([item['tgt_text'] for item in train_dataset], min_freq)
+    tgt_vocab.build_vocab(train_tgt, min_freq)
     
     return src_vocab, tgt_vocab

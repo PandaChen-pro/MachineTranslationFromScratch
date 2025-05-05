@@ -37,16 +37,31 @@ class TransformerModel(nn.Module):
         # 位置编码
         self.positional_encoding = PositionalEncoding(d_model)
         
-        # Transformer
-        self.transformer = nn.Transformer(
+        # 创建自定义TransformerEncoder和TransformerDecoder，以解决mask类型不匹配问题
+        encoder_layers = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
-            num_encoder_layers=num_encoder_layers,
-            num_decoder_layers=num_decoder_layers,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             activation=activation,
             batch_first=True
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layers, 
+            num_layers=num_encoder_layers
+        )
+        
+        decoder_layers = nn.TransformerDecoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation=activation,
+            batch_first=True
+        )
+        self.transformer_decoder = nn.TransformerDecoder(
+            decoder_layers, 
+            num_layers=num_decoder_layers
         )
         
         # 输出层
@@ -71,13 +86,13 @@ class TransformerModel(nn.Module):
                 src_padding_mask=None, tgt_padding_mask=None, 
                 memory_mask=None, memory_key_padding_mask=None):
         """前向传播"""
-        # 创建源语言padding mask
+        # 创建源语言padding mask，确保类型一致
         if src_padding_mask is None:
-            src_padding_mask = (src == 0)
+            src_padding_mask = (src == 0).to(src.device)
             
         # 编码器前向传播
         src_emb = self.positional_encoding(self.src_embedding(src) * math.sqrt(self.d_model))
-        memory = self.transformer.encoder(src_emb, mask=src_mask, src_key_padding_mask=src_padding_mask)
+        memory = self.transformer_encoder(src_emb, src_key_padding_mask=src_padding_mask)
         
         if tgt is None:  # 用于推理阶段
             return memory
@@ -85,15 +100,20 @@ class TransformerModel(nn.Module):
         # 创建目标语言subsequent mask
         if tgt_mask is None:
             tgt_len = tgt.size(1)
-            tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_len).to(tgt.device)
+            device = tgt.device
+            tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_len).to(device)
             
-        # 创建目标语言padding mask
+        # 创建目标语言padding mask，确保类型一致
         if tgt_padding_mask is None:
-            tgt_padding_mask = (tgt == 0)
+            tgt_padding_mask = (tgt == 0).to(tgt.device)
+            
+        # 设置memory key padding mask与src padding mask一致
+        if memory_key_padding_mask is None:
+            memory_key_padding_mask = src_padding_mask
             
         # 解码器前向传播
         tgt_emb = self.positional_encoding(self.tgt_embedding(tgt) * math.sqrt(self.d_model))
-        output = self.transformer.decoder(
+        output = self.transformer_decoder(
             tgt_emb, memory, 
             tgt_mask=tgt_mask,
             memory_mask=memory_mask,
@@ -107,9 +127,13 @@ class TransformerModel(nn.Module):
         return output
         
     def greedy_decode(self, src, src_padding_mask=None, max_len=100, bos_id=2, eos_id=3):
-        """贪婪解码，用于推理阶段"""
+        """优化的贪婪解码，用于推理阶段"""
         batch_size = src.size(0)
         device = src.device
+        
+        # 创建src_padding_mask
+        if src_padding_mask is None:
+            src_padding_mask = (src == 0).to(device)
         
         # 编码源语言
         memory = self.forward(src, src_padding_mask=src_padding_mask)
@@ -117,13 +141,14 @@ class TransformerModel(nn.Module):
         # 初始化目标序列
         ys = torch.ones(batch_size, 1).fill_(bos_id).long().to(device)
         
+        # 跟踪每个句子是否已完成
+        completed = torch.zeros(batch_size, dtype=torch.bool).to(device)
+        
         for i in range(max_len - 1):
             # 解码当前序列
             out = self.forward(
                 src, ys, 
                 src_padding_mask=src_padding_mask,
-                tgt_mask=None,  # 会自动创建
-                tgt_padding_mask=None,  # 会自动创建
                 memory_key_padding_mask=src_padding_mask
             )
             
@@ -132,83 +157,130 @@ class TransformerModel(nn.Module):
             next_word = torch.argmax(prob, dim=-1).unsqueeze(1)
             ys = torch.cat([ys, next_word], dim=1)
             
-            # 检查是否所有句子都生成了结束标记
-            if ((next_word == eos_id).sum() == batch_size):
+            # 更新完成状态
+            completed = completed | (next_word.squeeze(1) == eos_id)
+            
+            # 如果所有句子都完成，则停止
+            if completed.all():
                 break
                 
         return ys
         
     def beam_search(self, src, src_padding_mask=None, max_len=100, beam_size=5, bos_id=2, eos_id=3):
-        """集束搜索，用于更高质量的推理"""
-        batch_size = src.size(0)
+        """优化的束搜索，使用更高效的向量化实现"""
         device = src.device
+        batch_size = src.size(0)
+        
+        # 处理src_padding_mask
+        if src_padding_mask is None:
+            src_padding_mask = (src == 0).to(device)
         
         # 编码源语言
         memory = self.forward(src, src_padding_mask=src_padding_mask)
         
-        # 对每个样本单独进行集束搜索
-        all_hypotheses = []
+        # 对每个样本单独进行束搜索
+        final_outputs = []
         
-        for i in range(batch_size):
-            # 获取当前样本的编码
-            sample_memory = memory[i:i+1]  # [1, src_len, d_model]
-            sample_padding_mask = src_padding_mask[i:i+1] if src_padding_mask is not None else None
+        # 一次处理一个批次，避免显存溢出
+        for b in range(batch_size):
+            # 获取当前样本的编码和掩码
+            single_memory = memory[b:b+1]
+            single_src_padding_mask = src_padding_mask[b:b+1] if src_padding_mask is not None else None
             
-            # 初始候选序列
-            hypotheses = [([bos_id], 0.0)]
-            completed_hypotheses = []
+            # 初始化束
+            k_prev_words = torch.tensor([[bos_id]], dtype=torch.long, device=device)
+            seqs = k_prev_words
+            scores = torch.zeros(1, device=device)
             
-            for _ in range(max_len - 1):
-                new_hypotheses = []
-                
-                for seq, score in hypotheses:
-                    if seq[-1] == eos_id:
-                        completed_hypotheses.append((seq, score))
-                        continue
-                        
-                    # 构建当前序列tensor
-                    curr_seq = torch.tensor([seq], dtype=torch.long).to(device)
-                    
-                    # 解码当前序列
-                    out = self.forward(
-                        src[i:i+1], curr_seq,
-                        src_padding_mask=src_padding_mask[i:i+1] if src_padding_mask is not None else None,
-                        memory_key_padding_mask=sample_padding_mask
-                    )
-                    
-                    # 获取最后一个时间步的预测
-                    logits = out[0, -1]
-                    probs = torch.nn.functional.log_softmax(logits, dim=-1)
-                    
-                    # 获取topk
-                    topk_probs, topk_indices = probs.topk(beam_size)
-                    
-                    for prob, idx in zip(topk_probs, topk_indices):
-                        new_seq = seq + [idx.item()]
-                        new_score = score + prob.item()
-                        new_hypotheses.append((new_seq, new_score))
-                
-                # 只保留top-beam_size个候选
-                hypotheses = sorted(new_hypotheses, key=lambda x: x[1], reverse=True)[:beam_size]
-                
-                # 如果所有候选都已完成，则停止
-                if all(h[0][-1] == eos_id for h in hypotheses):
-                    completed_hypotheses.extend(hypotheses)
+            # 完成的序列
+            complete_seqs = []
+            complete_seqs_scores = []
+            
+            step = 1
+            
+            while True:
+                if step > max_len:  # 如果超过最大长度，停止解码
                     break
-            
-            # 如果没有完成的候选，则添加当前的候选
-            if len(completed_hypotheses) == 0:
-                completed_hypotheses = hypotheses
+                    
+                # 获取当前序列长度
+                num_words = seqs.size(1)
                 
-            # 选择最佳候选
-            best_hypothesis = max(completed_hypotheses, key=lambda x: x[1])
-            all_hypotheses.append(torch.tensor(best_hypothesis[0], dtype=torch.long).to(device))
+                # 推理：前向传播解码器
+                output = self.forward(
+                    src[b:b+1].expand(seqs.size(0), -1), 
+                    seqs,
+                    src_padding_mask=single_src_padding_mask.expand(seqs.size(0), -1) if single_src_padding_mask is not None else None,
+                    memory_key_padding_mask=single_src_padding_mask.expand(seqs.size(0), -1) if single_src_padding_mask is not None else None
+                )
+                
+                # 只关注最后一个时间步
+                output = output[:, -1, :]
+                scores_per_step = torch.log_softmax(output, dim=-1)
+                
+                # 添加到之前的分数
+                scores = scores.unsqueeze(1).expand(-1, scores_per_step.size(1))
+                scores = scores + scores_per_step
+                
+                # 对于第一步，始终从第一个束开始
+                if step == 1:
+                    top_k_scores, top_k_words = scores[0].topk(beam_size, dim=0)
+                else:
+                    # 展平
+                    top_k_scores, top_k_words = scores.view(-1).topk(beam_size, dim=0)
+                
+                # 将束索引转换为vocabulary索引
+                prev_word_inds = top_k_words // scores_per_step.size(1)
+                next_word_inds = top_k_words % scores_per_step.size(1)
+                
+                # 添加新词并更新分数
+                seqs = torch.cat([seqs[prev_word_inds], next_word_inds.unsqueeze(1)], dim=1)
+                scores = top_k_scores
+                
+                # 检查哪些序列已完成
+                incomplete_inds = []
+                complete_inds = []
+                for i, next_word in enumerate(next_word_inds):
+                    if next_word == eos_id:
+                        complete_inds.append(i)
+                    else:
+                        incomplete_inds.append(i)
+                        
+                # 设置完成的序列
+                for i in complete_inds:
+                    complete_seqs.append(seqs[i].tolist())
+                    complete_seqs_scores.append(scores[i].item())
+                    
+                # 检查停止条件
+                beam_size = len(incomplete_inds)
+                if beam_size == 0:
+                    break
+                    
+                # 更新追踪的序列和分数
+                seqs = seqs[incomplete_inds]
+                scores = scores[incomplete_inds]
+                
+                # 更新Memory的bath size与新的束大小匹配
+                single_memory = single_memory.expand(beam_size, -1, -1)
+                if single_src_padding_mask is not None:
+                    single_src_padding_mask = single_src_padding_mask.expand(beam_size, -1)
+                    
+                step += 1
+                
+            # 如果没有完成的序列，则使用当前最好的未完成序列
+            if len(complete_seqs) == 0:
+                best_seq = seqs[scores.argmax().item()].tolist()
+            else:
+                # 否则使用得分最高的完成序列
+                max_score_idx = complete_seqs_scores.index(max(complete_seqs_scores))
+                best_seq = complete_seqs[max_score_idx]
+                
+            final_outputs.append(torch.tensor(best_seq, device=device))
             
-        # 将所有候选填充到相同长度
-        max_hyp_len = max(len(h) for h in all_hypotheses)
-        result = torch.zeros(batch_size, max_hyp_len, dtype=torch.long).to(device)
+        # 填充所有序列到相同长度
+        max_len = max(len(seq) for seq in final_outputs)
+        padded_outputs = torch.zeros(batch_size, max_len, dtype=torch.long, device=device)
         
-        for i, hyp in enumerate(all_hypotheses):
-            result[i, :len(hyp)] = hyp
+        for i, seq in enumerate(final_outputs):
+            padded_outputs[i, :len(seq)] = seq
             
-        return result
+        return padded_outputs

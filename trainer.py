@@ -8,6 +8,7 @@ import os
 import json
 from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
 from tqdm import tqdm
+import random
 
 from util import save_checkpoint, load_checkpoint
 
@@ -93,7 +94,7 @@ class Trainer:
             train_loss = self._train_epoch(epoch)
             
             # 验证
-            val_loss, bleu = self.evaluate()
+            val_loss, bleu = self.evaluate(fast_eval=True)
             
             # 更新学习率
             self.scheduler.step(bleu)
@@ -171,15 +172,33 @@ class Trainer:
                 
         return total_loss / len(self.train_loader)
     
-    def evaluate(self):
+    def evaluate(self, fast_eval=False):
         """评估模型"""
         self.model.eval()
         total_loss = 0
         all_references = []
         all_hypotheses = []
         
+        # 如果启用快速评估，则只评估指定数量的批次
+        eval_size = self.config.get('fast_eval_size', 100)  # 默认使用100个样本进行快速评估
+        
         with torch.no_grad():
-            for batch in tqdm(self.val_loader, desc="Evaluating"):
+            # 如果快速评估且数据集较大，则随机选择一部分
+            if fast_eval and len(self.val_loader) > eval_size / self.config.get('batch_size', 64):
+                # 随机采样一些批次
+                batch_indices = list(range(len(self.val_loader)))
+                random.shuffle(batch_indices)
+                sampled_indices = batch_indices[:eval_size]
+                eval_loader = [self.val_loader.dataset[i] for i in sampled_indices]
+                eval_loader = torch.utils.data.DataLoader(
+                    eval_loader, 
+                    batch_size=self.config.get('batch_size', 64),
+                    collate_fn=self.val_loader.collate_fn
+                )
+            else:
+                eval_loader = self.val_loader
+            
+            for batch in tqdm(eval_loader, desc="Evaluating"):
                 # 移至GPU
                 src = batch['src'].to(self.device)
                 tgt = batch['tgt'].to(self.device)
@@ -198,8 +217,11 @@ class Trainer:
                 loss = self.criterion(output.reshape(-1, output.size(-1)), tgt_output.reshape(-1))
                 total_loss += loss.item()
                 
-                # 生成翻译
-                translations = self._generate_translations(src)
+                # 生成翻译 - 训练中使用贪婪搜索以加速评估
+                if fast_eval:
+                    translations = self._generate_translations(src, use_beam_search=False)
+                else:
+                    translations = self._generate_translations(src, use_beam_search=self.config.get('use_beam_search', True))
                 
                 # 收集参考和假设翻译
                 for i, (ref, hyp) in enumerate(zip(references, translations)):
@@ -215,11 +237,15 @@ class Trainer:
             smoothing_function=smoothie
         )
         
-        return total_loss / len(self.val_loader), bleu
+        return total_loss / len(eval_loader), bleu
     
-    def _generate_translations(self, src):
+    def _generate_translations(self, src, use_beam_search=None):
         """生成翻译"""
-        if self.config.get('use_beam_search', True):
+        # 如果未指定，则使用配置中的设置
+        if use_beam_search is None:
+            use_beam_search = self.config.get('use_beam_search', True)
+            
+        if use_beam_search:
             # 使用束搜索
             beam_size = self.config.get('beam_size', 5)
             beam_outputs = self.model.beam_search(

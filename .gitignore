@@ -1,0 +1,3 @@
+/__pycache__/
+/checkpoints/best_model.pt
+/checkpoints/checkpoint.pt

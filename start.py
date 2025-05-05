@@ -3,12 +3,14 @@ import os
 import torch
 import wandb
 from tqdm import tqdm
+import nltk
 
 from dataset_loader import (
     TranslationDataset,
     build_vocabs,
     get_dataloader,
-    Vocabulary
+    Vocabulary,
+    load_and_split_data
 )
 from model import TransformerModel
 from trainer import Trainer
@@ -18,12 +20,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description='中英神经机器翻译')
     
     # 数据相关
-    parser.add_argument('--train_src', type=str, default='./data/chinese.txt', help='训练集源语言文件')
-    parser.add_argument('--train_tgt', type=str, default='./data/english.txt', help='训练集目标语言文件')
-    parser.add_argument('--val_src', type=str, default='./data/Niu.dev.txt', help='验证集源语言文件')
-    parser.add_argument('--val_tgt', type=str, default='./data/Niu.dev.reference', help='验证集目标语言文件')
-    parser.add_argument('--test_src', type=str, default='./data/Niu.test.txt', help='测试集源语言文件')
-    parser.add_argument('--test_tgt', type=str, default='Niu.test.reference', help='测试集目标语言文件（可选）')
+    parser.add_argument('--src_file', type=str, default='./data/chinese.txt', help='源语言文件（中文）')
+    parser.add_argument('--tgt_file', type=str, default='./data/english.txt', help='目标语言文件（英文）')
+    parser.add_argument('--train_ratio', type=float, default=0.8, help='训练集比例')
+    parser.add_argument('--val_ratio', type=float, default=0.1, help='验证集比例')
+    parser.add_argument('--test_ratio', type=float, default=0.1, help='测试集比例')
     
     # 模型相关
     parser.add_argument('--d_model', type=int, default=512, help='模型维度')
@@ -38,12 +39,14 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=64, help='批次大小')
     parser.add_argument('--lr', type=float, default=0.0001, help='学习率')
     parser.add_argument('--clip_grad', type=float, default=1.0, help='梯度裁剪阈值')
-    parser.add_argument('--seed', type=int, default=3407, help='随机种子')
+    parser.add_argument('--seed', type=int, default=42, help='随机种子')
     parser.add_argument('--max_len', type=int, default=100, help='最大序列长度')
     
     # 推理相关
     parser.add_argument('--beam_size', type=int, default=5, help='束搜索宽度')
     parser.add_argument('--use_beam_search', action='store_true', help='使用束搜索进行解码')
+    parser.add_argument('--fast_eval', action='store_true', help='使用快速评估模式')
+    parser.add_argument('--fast_eval_size', type=int, default=100, help='快速评估样本数量')
     
     # 路径相关
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help='检查点目录')
@@ -79,6 +82,12 @@ def main():
     os.makedirs(args.vocab_dir, exist_ok=True)
     os.makedirs(args.output_dir, exist_ok=True)
     
+    # 确保nltk的bleu评估所需资源已下载
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        nltk.download('punkt')
+    
     # 创建配置字典
     config = {
         'd_model': args.d_model,
@@ -96,15 +105,27 @@ def main():
         'wandb_project': args.wandb_project,
         'wandb_name': args.wandb_name,
         'resume_wandb': args.resume_wandb,
-        'resume_training': args.resume_training
+        'resume_training': args.resume_training,
+        'fast_eval': args.fast_eval,
+        'fast_eval_size': args.fast_eval_size
     }
+    
+    # 加载并分割数据
+    print("Loading and splitting data...")
+    train_src, train_tgt, val_src, val_tgt, test_src, test_tgt = load_and_split_data(
+        args.src_file, 
+        args.tgt_file,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
+        seed=args.seed
+    )
     
     # 训练模式
     if args.mode == 'train':
-        # 加载训练和验证数据
-        print("Loading datasets...")
-        train_dataset = TranslationDataset(args.train_src, args.train_tgt, args.max_len)
-        val_dataset = TranslationDataset(args.val_src, args.val_tgt, args.max_len)
+        # 构建数据集
+        train_dataset = TranslationDataset(train_src, train_tgt, args.max_len)
+        val_dataset = TranslationDataset(val_src, val_tgt, args.max_len)
         
         # 构建或加载词汇表
         src_vocab_path = os.path.join(args.vocab_dir, 'src_vocab.pt')
@@ -116,7 +137,7 @@ def main():
             tgt_vocab = Vocabulary.load(tgt_vocab_path)
         else:
             print("Building vocabularies...")
-            src_vocab, tgt_vocab = build_vocabs(train_dataset)
+            src_vocab, tgt_vocab = build_vocabs(train_src, train_tgt)
             # 保存词汇表
             src_vocab.save(src_vocab_path)
             tgt_vocab.save(tgt_vocab_path)
@@ -188,9 +209,8 @@ def main():
         src_vocab = Vocabulary.load(src_vocab_path)
         tgt_vocab = Vocabulary.load(tgt_vocab_path)
         
-        # 加载测试数据
-        print("Loading test dataset...")
-        test_dataset = TranslationDataset(args.test_src, args.test_tgt, args.max_len)
+        # 构建测试数据集
+        test_dataset = TranslationDataset(test_src, test_tgt, args.max_len)
         test_loader = get_dataloader(test_dataset, args.batch_size, src_vocab, tgt_vocab)
         
         # 加载模型
@@ -218,17 +238,32 @@ def main():
             model=model,
             train_loader=None,
             val_loader=test_loader,
-            src_vocab=src_vocab,·
+            src_vocab=src_vocab,
             tgt_vocab=tgt_vocab,
             config=config,
             device=device,
             checkpoint_dir=args.checkpoint_dir
         )
         
-        # 评估模型
+        # 评估模型 - 在测试集上使用完整评估
         print("Evaluating on test set...")
-        test_loss, test_bleu = trainer.evaluate()
+        test_loss, test_bleu = trainer.evaluate(fast_eval=False)
         print(f"Test Loss: {test_loss:.4f}, Test BLEU: {test_bleu:.4f}")
+        
+        # 也可以生成翻译结果并保存
+        model.eval()
+        all_translations = []
+        
+        with torch.no_grad():
+            for batch in tqdm(test_loader, desc="Generating translations"):
+                src = batch['src'].to(device)
+                translations = trainer._generate_translations(src, use_beam_search=args.use_beam_search)
+                all_translations.extend(translations)
+                
+        # 保存翻译结果
+        output_file = os.path.join(args.output_dir, 'translations.txt')
+        write_translations(all_translations, output_file)
+        print(f"Translations saved to {output_file}")
 
 if __name__ == '__main__':
     main()
