@@ -17,6 +17,7 @@ def set_seed(seed):
 def save_checkpoint(state, is_best, checkpoint_dir, filename='checkpoint.pt'):
     """保存检查点"""
     # 保存最新检查点
+    checkpoint_path = os.path.join(checkpoint_dir, filename)
     torch.save(state, os.path.join(checkpoint_dir, filename))
     # 如果是最佳模型，复制一份
     if is_best:
