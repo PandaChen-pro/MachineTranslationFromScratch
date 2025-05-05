@@ -3,4 +3,6 @@ Starting training...
 Starting training from Epoch 1...
 Epoch 1/80:   0%|                                                                                                                                  | 0/1250 [00:00<?, ?it/s]/data/miniconda/envs/torch/lib/python3.10/site-packages/torch/nn/functional.py:5137: UserWarning: Support for mismatched key_padding_mask and attn_mask is deprecated. Use same type for both instead.
   warnings.warn(
-Epoch 1/80:   3%|███                                                                                            | 40/1250 [00:20<09:57,  2.03it/s, loss=9.1628, lr=0.000003]
+Epoch 1/80:   8%|███████▌                                                                                      | 100/1250 [00:51<14:15,  1.34it/s, loss=8.7086, lr=0.000007]/data/miniconda/envs/torch/lib/python3.10/site-packages/torch/nn/functional.py:5137: UserWarning: Support for mismatched key_padding_mask and attn_mask is deprecated. Use same type for both instead.
+  warnings.warn(
+Epoch 1/80:  66%|██████████████████████████████████████████████████████████████▍                               | 830/1250 [06:57<03:27,  2.02it/s, loss=5.6295, lr=0.000062]
