@@ -15,6 +15,52 @@ import math # Import math
 # Assume util.py exists with these functions:
 from util import save_checkpoint, load_checkpoint
 
+class LabelSmoothingLoss(nn.Module):
+    """
+    实现标签平滑的损失函数
+    
+    Args:
+        size: 词汇表大小
+        padding_idx: 填充标记的索引，在计算损失时会被忽略
+        smoothing: 平滑参数，通常设置为0.1
+    """
+    def __init__(self, size, padding_idx, smoothing=0.1):
+        super(LabelSmoothingLoss, self).__init__()
+        self.criterion = nn.KLDivLoss(reduction='sum')
+        self.padding_idx = padding_idx
+        self.confidence = 1.0 - smoothing  # 正确标签的置信度
+        self.smoothing = smoothing  # 分配给其他标签的概率
+        self.size = size  # 词汇表大小
+        self.true_dist = None
+        
+    def forward(self, x, target):
+        """
+        计算带标签平滑的损失
+        
+        Args:
+            x: 模型输出的logits，形状为 [batch_size * seq_len, vocab_size]
+            target: 目标索引，形状为 [batch_size * seq_len]
+            
+        Returns:
+            平滑后的KL散度损失
+        """
+        assert x.size(1) == self.size
+        true_dist = x.clone()
+        true_dist.fill_(self.smoothing / (self.size - 2))  # 将平滑概率均匀分配给所有非正确、非填充的标签
+        true_dist.scatter_(1, target.unsqueeze(1), self.confidence)  # 将confidence概率分配给正确标签
+        true_dist[:, self.padding_idx] = 0  # 填充标记不参与损失计算
+        mask = (target == self.padding_idx)
+        true_dist.masked_fill_(mask.unsqueeze(1), 0.0)  # 将填充位置的所有概率设为0
+        
+        # 保存true_dist用于调试
+        self.true_dist = true_dist
+        
+        # 对logits应用log_softmax，然后计算KL散度
+        x = torch.log_softmax(x, dim=1)
+        non_pad_count = target.numel() - mask.sum().item()
+        return self.criterion(x, true_dist) / non_pad_count
+
+
 # --- Learning Rate Scheduler Function ---
 def get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps, last_epoch=-1):
     """
@@ -65,11 +111,17 @@ class Trainer:
             model.parameters(),
             lr=config['learning_rate'], # Base learning rate
             betas=(0.9, 0.98),
-            eps=1e-9
+            eps=1e-9,
+            weight_decay=1e-4
         )
 
         # --- Loss Function ---
-        self.criterion = nn.CrossEntropyLoss(ignore_index=tgt_vocab.pad_token_id)
+        smoothing = config.get('label_smoothing', 0.1)
+        self.criterion = LabelSmoothingLoss(
+            size=len(tgt_vocab),
+            padding_idx=tgt_vocab.pad_token_id,
+            smoothing=smoothing
+        )
 
         # --- Learning Rate Scheduler (Warmup + Decay) ---
         self.scheduler = None # Initialize as None

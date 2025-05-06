@@ -1,0 +1,61 @@
+Initialized new wandb run with id: k5r1icut
+Starting training...
+Starting training from Epoch 1...
+Epoch 1/80:   0%|                                                                                                          | 0/1250 [00:00<?, ?it/s]/home/Minconda3/envs/translation/lib/python3.10/site-packages/torch/nn/functional.py:5137: UserWarning: Support for mismatched key_padding_mask and attn_mask is deprecated. Use same type for both instead.
+  warnings.warn(
+Epoch 1/80: 100%|█████████████████████████████████████████████████████████████████████| 1250/1250 [09:41<00:00,  2.15it/s, loss=4.7357, lr=0.000094]
+Epoch 1 Training finished. Avg Loss: 5.8952, Time: 581.85s
+Evaluating (Fast ~5000 samples / 79 batches):   0%|                                                                         | 0/157 [00:00<?, ?it/s]/home/Minconda3/envs/translation/lib/python3.10/site-packages/torch/nn/modules/transformer.py:408: UserWarning: The PyTorch API of nested tensors is in prototype stage and will change in the near future. (Triggered internally at ../aten/src/ATen/NestedTensorImpl.cpp:178.)
+  output = torch._nested_tensor_from_mask(output, src_key_padding_mask.logical_not(), mask_check=False)
+Epoch 2/80: 100%|█████████████████████████████████████████████████████████████████████| 1250/1250 [09:41<00:00,  2.15it/s, loss=3.8433, lr=0.000187]
+New best model saved with BLEU: 0.0049
+Epoch 1/80 Completed. Train Loss: 5.8952, Val Loss: 4.6089, Val BLEU: 0.0049, Best Val BLEU: 0.0049
+Epoch 2 Training finished. Avg Loss: 4.2144, Time: 581.53s
+Epoch 3/80: 100%|█████████████████████████████████████████████████████████████████████| 1250/1250 [09:40<00:00,  2.15it/s, loss=3.0195, lr=0.000281]
+New best model saved with BLEU: 0.0181
+Epoch 2/80 Completed. Train Loss: 4.2144, Val Loss: 3.7841, Val BLEU: 0.0181, Best Val BLEU: 0.0181
+Epoch 3 Training finished. Avg Loss: 3.4960, Time: 580.67s
+Epoch 4/80: 100%|█████████████████████████████████████████████████████████████████████| 1250/1250 [09:42<00:00,  2.15it/s, loss=2.7532, lr=0.000297]
+New best model saved with BLEU: 0.0442
+Epoch 3/80 Completed. Train Loss: 3.4960, Val Loss: 3.1376, Val BLEU: 0.0442, Best Val BLEU: 0.0442
+Epoch 4 Training finished. Avg Loss: 2.9791, Time: 582.25s
+Epoch 5/80: 100%|█████████████████████████████████████████████████████████████████████| 1250/1250 [09:42<00:00,  2.14it/s, loss=2.6730, lr=0.000293]
+New best model saved with BLEU: 0.0629
+Epoch 4/80 Completed. Train Loss: 2.9791, Val Loss: 2.7784, Val BLEU: 0.0629, Best Val BLEU: 0.0629
+Epoch 5 Training finished. Avg Loss: 2.6906, Time: 582.83s
+Epoch 6/80: 100%|█████████████████████████████████████████████████████████████████████| 1250/1250 [09:43<00:00,  2.14it/s, loss=2.4475, lr=0.000289]
+New best model saved with BLEU: 0.0717
+Epoch 5/80 Completed. Train Loss: 2.6906, Val Loss: 2.6218, Val BLEU: 0.0717, Best Val BLEU: 0.0717
+Epoch 6 Training finished. Avg Loss: 2.5316, Time: 583.01s
+Epoch 7/80: 100%|█████████████████████████████████████████████████████████████████████| 1250/1250 [09:42<00:00,  2.15it/s, loss=2.2489, lr=0.000285]
+New best model saved with BLEU: 0.0760
+Epoch 6/80 Completed. Train Loss: 2.5316, Val Loss: 2.5231, Val BLEU: 0.0760, Best Val BLEU: 0.0760
+Epoch 7 Training finished. Avg Loss: 2.4299, Time: 582.60s
+Epoch 8/80: 100%|█████████████████████████████████████████████████████████████████████| 1250/1250 [09:43<00:00,  2.14it/s, loss=2.4445, lr=0.000281]
+New best model saved with BLEU: 0.0832
+Epoch 7/80 Completed. Train Loss: 2.4299, Val Loss: 2.4509, Val BLEU: 0.0832, Best Val BLEU: 0.0832
+Epoch 8 Training finished. Avg Loss: 2.3559, Time: 583.94s
+Epoch 9/80: 100%|█████████████████████████████████████████████████████████████████████| 1250/1250 [09:41<00:00,  2.15it/s, loss=2.3856, lr=0.000277]
+Epoch 8/80 Completed. Train Loss: 2.3559, Val Loss: 2.4068, Val BLEU: 0.0821, Best Val BLEU: 0.0832
+Epoch 9 Training finished. Avg Loss: 2.3004, Time: 581.61s
+Epoch 10/80: 100%|████████████████████████████████████████████████████████████████████| 1250/1250 [09:43<00:00,  2.14it/s, loss=2.3725, lr=0.000273]
+New best model saved with BLEU: 0.0851
+Epoch 9/80 Completed. Train Loss: 2.3004, Val Loss: 2.3681, Val BLEU: 0.0851, Best Val BLEU: 0.0851
+Epoch 10 Training finished. Avg Loss: 2.2605, Time: 583.45s
+Epoch 11/80: 100%|████████████████████████████████████████████████████████████████████| 1250/1250 [09:42<00:00,  2.14it/s, loss=2.4816, lr=0.000270]
+New best model saved with BLEU: 0.0862
+Epoch 10/80 Completed. Train Loss: 2.2605, Val Loss: 2.3461, Val BLEU: 0.0862, Best Val BLEU: 0.0862
+Epoch 11 Training finished. Avg Loss: 2.2277, Time: 582.92s
+Epoch 12/80: 100%|████████████████████████████████████████████████████████████████████| 1250/1250 [09:43<00:00,  2.14it/s, loss=2.2594, lr=0.000266]
+New best model saved with BLEU: 0.0879
+Epoch 11/80 Completed. Train Loss: 2.2277, Val Loss: 2.3208, Val BLEU: 0.0879, Best Val BLEU: 0.0879
+Epoch 12 Training finished. Avg Loss: 2.2022, Time: 583.42s
+Epoch 13/80: 100%|███████████████████████████████████████████| 1250/1250 [09:42<00:00,  2.15it/s, loss=2.3533, lr=0.000262]                         
+New best model saved with BLEU: 0.0908
+Epoch 12/80 Completed. Train Loss: 2.2022, Val Loss: 2.3027, Val BLEU: 0.0908, Best Val BLEU: 0.0908
+Epoch 13 Training finished. Avg Loss: 2.1833, Time: 582.44s
+Epoch 14/80: 100%|███████████████████████████████████████████| 1250/1250 [09:43<00:00,  2.14it/s, loss=2.3166, lr=0.000258]
+New best model saved with BLEU: 0.0912
+Epoch 13/80 Completed. Train Loss: 2.1833, Val Loss: 2.2897, Val BLEU: 0.0912, Best Val BLEU: 0.0912
+Epoch 14 Training finished. Avg Loss: 2.1657, Time: 583.93s
+Evaluating (Fast ~5000 samples / 79 batches):  36%|█████████████▉                         | 56/157 [04:50<08:45,  5.20s/it]

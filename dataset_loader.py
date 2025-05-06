@@ -220,7 +220,7 @@ def get_dataloader(dataset, batch_size, src_vocab, tgt_vocab=None, shuffle=False
         collate_fn=lambda batch: collate_fn(batch, src_vocab, tgt_vocab)
     )
 
-def build_vocabs(train_src, train_tgt, min_freq=5):
+def build_vocabs(train_src, train_tgt, min_freq=2):
     """构建源语言和目标语言的词汇表"""
     src_vocab = Vocabulary()
     tgt_vocab = Vocabulary()

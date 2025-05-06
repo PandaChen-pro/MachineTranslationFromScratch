@@ -4,7 +4,7 @@ import torch
 import wandb
 from tqdm import tqdm
 import nltk
-import math # Make sure math is imported if needed elsewhere, though not directly used in this snippet after changes
+import math 
 
 from dataset_loader import (
     TranslationDataset,
@@ -17,9 +17,6 @@ from model import TransformerModel
 from trainer import Trainer
 from util import set_seed, write_translations, get_device, count_parameters # Assumed to exist
 
-# Only call login if using wandb
-# Consider calling it inside main() after checking args.use_wandb
-# wandb.login() # You might want to handle login errors or make it conditional
 
 def parse_args():
     parser = argparse.ArgumentParser(description='中英神经机器翻译')
@@ -37,7 +34,7 @@ def parse_args():
     parser.add_argument('--num_encoder_layers', type=int, default=6, help='编码器层数')
     parser.add_argument('--num_decoder_layers', type=int, default=6, help='解码器层数')
     parser.add_argument('--dim_feedforward', type=int, default=2048, help='前馈网络维度')
-    parser.add_argument('--dropout', type=float, default=0.1, help='dropout率')
+    parser.add_argument('--dropout', type=float, default=0.3, help='dropout率')
 
     # --- 训练相关 ---
     parser.add_argument('--epochs', type=int, default=80, help='训练轮数')
