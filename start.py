@@ -5,13 +5,17 @@ import wandb
 from tqdm import tqdm
 import nltk
 import math 
+import pickle
+import json
 
 from dataset_loader import (
     TranslationDataset,
     build_vocabs,
     get_dataloader,
     Vocabulary,
-    load_and_split_data
+    load_and_split_data,
+    save_dataset,
+    load_dataset
 )
 from model import TransformerModel
 from trainer import Trainer
@@ -27,29 +31,33 @@ def parse_args():
     parser.add_argument('--train_ratio', type=float, default=0.8, help='训练集比例')
     parser.add_argument('--val_ratio', type=float, default=0.1, help='验证集比例')
     parser.add_argument('--test_ratio', type=float, default=0.1, help='测试集比例')
+    parser.add_argument('--save_dir', type=str, default='./split_data', help='数据集保存目录')
+    parser.add_argument('--load_saved_data', action='store_true', help='是否加载已保存的数据集')
 
     # --- 模型相关 ---
-    parser.add_argument('--d_model', type=int, default=512, help='模型维度')
+    parser.add_argument('--d_model', type=int, default=384, help='模型维度')
     parser.add_argument('--nhead', type=int, default=8, help='注意力头数')
-    parser.add_argument('--num_encoder_layers', type=int, default=6, help='编码器层数')
-    parser.add_argument('--num_decoder_layers', type=int, default=6, help='解码器层数')
-    parser.add_argument('--dim_feedforward', type=int, default=2048, help='前馈网络维度')
-    parser.add_argument('--dropout', type=float, default=0.3, help='dropout率')
+    parser.add_argument('--num_encoder_layers', type=int, default=4, help='编码器层数')
+    parser.add_argument('--num_decoder_layers', type=int, default=4, help='解码器层数')
+    parser.add_argument('--dim_feedforward', type=int, default=1536, help='前馈网络维度')
+    parser.add_argument('--dropout', type=float, default=0.2, help='dropout率')
 
     # --- 训练相关 ---
-    parser.add_argument('--epochs', type=int, default=80, help='训练轮数')
+    parser.add_argument('--epochs', type=int, default=50, help='训练轮数')
     parser.add_argument('--batch_size', type=int, default=64, help='批次大小')
-    parser.add_argument('--lr', type=float, default=3e-4, help='基础学习率 (Warmup 后的最大学习率)')
-    parser.add_argument('--warmup_steps', type=int, default=4000, help='学习率预热步数') 
+    parser.add_argument('--lr', type=float, default=5e-4, help='基础学习率 (Warmup 后的最大学习率)')
+    parser.add_argument('--warmup_steps', type=int, default=1000, help='学习率预热步数') 
+    parser.add_argument('--factor', type=float, default=1.0, help='Noam优化器的因子')
     parser.add_argument('--clip_grad', type=float, default=1.0, help='梯度裁剪阈值')
     parser.add_argument('--seed', type=int, default=3407, help='随机种子')
     parser.add_argument('--max_len', type=int, default=100, help='最大序列长度')
+    parser.add_argument('--patience', type=int, default=5, help='早停耐心值，连续多少个epoch无改善后停止训练')
 
     # --- 推理相关 ---
-    parser.add_argument('--beam_size', type=int, default=5, help='束搜索宽度')
+    parser.add_argument('--beam_size', type=int, default=3, help='束搜索宽度')
     parser.add_argument('--use_beam_search', action='store_true', help='使用束搜索进行解码')
     parser.add_argument('--fast_eval', action='store_true', help='使用快速评估模式')
-    parser.add_argument('--fast_eval_size', type=int, default=5000, help='快速评估样本数量') 
+    parser.add_argument('--fast_eval_size', type=int, default=2000, help='快速评估样本数量') 
 
     # --- 路径相关 ---
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help='检查点目录')
@@ -58,8 +66,8 @@ def parse_args():
 
     # --- wandb相关 ---
     parser.add_argument('--use_wandb', action='store_true', help='是否使用wandb记录训练')
-    parser.add_argument('--wandb_project', type=str, default='nmt-transformer', help='wandb项目名')
-    parser.add_argument('--wandb_name', type=str, default='zh-en-transformer', help='wandb运行名')
+    parser.add_argument('--wandb_project', type=str, default='nmt-noam-transformer', help='wandb项目名')
+    parser.add_argument('--wandb_name', type=str, default='zh-en-noam-noam-transformer', help='wandb运行名')
     parser.add_argument('--resume_wandb', action='store_true', help='是否恢复wandb运行')
 
     # --- 运行模式 ---
@@ -84,6 +92,7 @@ def main():
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     os.makedirs(args.vocab_dir, exist_ok=True)
     os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.save_dir, exist_ok=True)
 
     # 确保nltk的bleu评估所需资源已下载
     try:
@@ -103,6 +112,7 @@ def main():
         'dropout': args.dropout,
         'learning_rate': args.lr,
         'warmup_steps': args.warmup_steps,          
+        'factor': args.factor,
         'clip_grad': args.clip_grad,
         'max_len': args.max_len,
         'batch_size': args.batch_size,               
@@ -115,7 +125,8 @@ def main():
         'resume_wandb': args.resume_wandb,
         'resume_training': args.resume_training,
         'fast_eval': args.fast_eval,
-        'fast_eval_size': args.fast_eval_size      
+        'fast_eval_size': args.fast_eval_size,
+        'patience': args.patience
     }
 
     if args.use_wandb:
@@ -126,21 +137,112 @@ def main():
             args.use_wandb = False
             config['use_wandb'] = False
 
-
-    # 加载并分割数据
-    print("Loading and splitting data...")
-    train_src, train_tgt, val_src, val_tgt, test_src, test_tgt = load_and_split_data(
-        args.src_file,
-        args.tgt_file,
-        train_ratio=args.train_ratio,
-        val_ratio=args.val_ratio,
-        test_ratio=args.test_ratio,
-        seed=args.seed
-    )
+    # 准备数据集
+    if args.load_saved_data and os.path.exists(args.save_dir):
+        print("加载已保存的数据集...")
+        
+        try:
+            # 加载数据集
+            with open(os.path.join(args.save_dir, 'train_src.pkl'), 'rb') as f:
+                train_src = pickle.load(f)
+            with open(os.path.join(args.save_dir, 'train_tgt.pkl'), 'rb') as f:
+                train_tgt = pickle.load(f)
+            
+            with open(os.path.join(args.save_dir, 'val_src.pkl'), 'rb') as f:
+                val_src = pickle.load(f)
+            with open(os.path.join(args.save_dir, 'val_tgt.pkl'), 'rb') as f:
+                val_tgt = pickle.load(f)
+            
+            with open(os.path.join(args.save_dir, 'test_src.pkl'), 'rb') as f:
+                test_src = pickle.load(f)
+            with open(os.path.join(args.save_dir, 'test_tgt.pkl'), 'rb') as f:
+                test_tgt = pickle.load(f)
+            
+            # 加载数据集信息
+            with open(os.path.join(args.save_dir, 'dataset_info.json'), 'r', encoding='utf-8') as f:
+                dataset_info = json.load(f)
+            
+            print(f"已加载数据集:")
+            print(f"训练集: {dataset_info['train_size']} 条")
+            print(f"验证集: {dataset_info['val_size']} 条")
+            print(f"测试集: {dataset_info['test_size']} 条")
+            
+            train_data = (train_src, train_tgt)
+            val_data = (val_src, val_tgt)
+            test_data = (test_src, test_tgt)
+            
+        except Exception as e:
+            print(f"加载数据集失败: {e}，将创建新的数据集...")
+            args.load_saved_data = False
+            
+    if not args.load_saved_data:
+        print("创建新的数据集...")
+        # 读取源语言和目标语言文件
+        with open(args.src_file, 'r', encoding='utf-8') as f:
+            src_sentences = [line.strip() for line in f]
+        
+        with open(args.tgt_file, 'r', encoding='utf-8') as f:
+            tgt_sentences = [line.strip() for line in f]
+            
+        # 创建数据集对象
+        dataset = TranslationDataset(src_sentences, tgt_sentences, args.max_len)
+        # 划分数据集
+        (train_src, train_tgt), (val_src, val_tgt), (test_src, test_tgt) = dataset.split_data(
+            train_ratio=args.train_ratio,
+            val_ratio=args.val_ratio,
+            test_ratio=args.test_ratio
+        )
+        # 保存数据集
+        train_src_path = os.path.join(args.save_dir, 'train_src.pkl')
+        train_tgt_path = os.path.join(args.save_dir, 'train_tgt.pkl')
+        val_src_path = os.path.join(args.save_dir, 'val_src.pkl')
+        val_tgt_path = os.path.join(args.save_dir, 'val_tgt.pkl')
+        test_src_path = os.path.join(args.save_dir, 'test_src.pkl')
+        test_tgt_path = os.path.join(args.save_dir, 'test_tgt.pkl')
+        
+        os.makedirs(args.save_dir, exist_ok=True)
+        
+        # 保存数据集
+        with open(train_src_path, 'wb') as f:
+            pickle.dump(train_src, f)
+        with open(train_tgt_path, 'wb') as f:
+            pickle.dump(train_tgt, f)
+        
+        with open(val_src_path, 'wb') as f:
+            pickle.dump(val_src, f)
+        with open(val_tgt_path, 'wb') as f:
+            pickle.dump(val_tgt, f)
+        
+        with open(test_src_path, 'wb') as f:
+            pickle.dump(test_src, f)
+        with open(test_tgt_path, 'wb') as f:
+            pickle.dump(test_tgt, f)
+        
+        # 保存数据集信息
+        dataset_info = {
+            'train_size': len(train_src),
+            'val_size': len(val_src),
+            'test_size': len(test_src)
+        }
+        
+        with open(os.path.join(args.save_dir, 'dataset_info.json'), 'w', encoding='utf-8') as f:
+            json.dump(dataset_info, f, ensure_ascii=False, indent=2)
+        
+        print(f"数据集已保存到 {args.save_dir} 目录")
+        print(f"训练集: {dataset_info['train_size']} 条")
+        print(f"验证集: {dataset_info['val_size']} 条")
+        print(f"测试集: {dataset_info['test_size']} 条")
+        
+        train_data = (train_src, train_tgt)
+        val_data = (val_src, val_tgt)
+        test_data = (test_src, test_tgt)
 
     # 训练模式
     if args.mode == 'train':
         # 构建数据集
+        train_src, train_tgt = train_data
+        val_src, val_tgt = val_data
+        
         train_dataset = TranslationDataset(train_src, train_tgt, args.max_len)
         val_dataset = TranslationDataset(val_src, val_tgt, args.max_len)
 
@@ -228,6 +330,7 @@ def main():
         print(f"Target vocabulary size: {len(tgt_vocab)}")
 
         # 构建测试数据集
+        test_src, test_tgt = test_data
         test_dataset = TranslationDataset(test_src, test_tgt, args.max_len)
         test_batch_size = args.batch_size * 2
         test_loader = get_dataloader(test_dataset, test_batch_size, src_vocab, tgt_vocab)

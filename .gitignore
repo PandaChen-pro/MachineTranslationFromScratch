@@ -2,3 +2,4 @@
 /checkpoints/best_model.pt
 /checkpoints/checkpoint.pt
 /.git_disabled/
+/wandb/

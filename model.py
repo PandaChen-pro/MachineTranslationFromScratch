@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import math
+import torch.nn.functional as F
 
 class PositionalEncoding(nn.Module):
     """位置编码模块"""
@@ -173,153 +174,90 @@ class TransformerModel(nn.Module):
 
     def beam_search(self, src, max_len=100, beam_size=5, bos_id=2, eos_id=3, pad_id=0):
         """
-        Beam search decoding.
-        Simplified implementation focusing on core logic. May lack optimizations like
-        length normalization or efficient batch handling across beams.
+        优化的beam search解码实现
+        
+        Args:
+            src: 源语言输入 [batch_size, src_len]
+            max_len: 最大生成长度
+            beam_size: beam大小
+            bos_id: 开始标记的ID
+            eos_id: 结束标记的ID
+            pad_id: 填充标记的ID
+            
+        Returns:
+            生成的序列列表
         """
         device = src.device
         batch_size = src.size(0)
-        pad_idx = pad_id # Use passed pad_id
-
-        src_padding_mask = (src == pad_idx).to(device)  # [Batch, SrcSeqLen]
-
-        src_emb = self.positional_encoding(self.src_embedding(src) * math.sqrt(self.d_model))
-        memory = self.transformer_encoder(src_emb, src_key_padding_mask=src_padding_mask)
-
-        final_outputs = []
-
-        for b in range(batch_size):
-            single_memory = memory[b:b+1].expand(beam_size, -1, -1) # Expand memory for beam
-            single_src_padding_mask = src_padding_mask[b:b+1].expand(beam_size, -1) # Expand mask
-
-            k_prev_words = torch.tensor([[bos_id]], dtype=torch.long, device=device) # [1, 1]
-            seqs = k_prev_words # Current active hypotheses [beam, seq_len]
-            top_k_scores = torch.zeros(1, device=device) # [beam]
-
-            complete_seqs = []
-            complete_seqs_scores = []
-
-            step = 1
-            while True:
-                if step > max_len: # Stop if max length reached
-                     break
-
-
-                tgt_emb = self.positional_encoding(self.tgt_embedding(seqs) * math.sqrt(self.d_model))
-                current_beam_size = seqs.size(0)
-                current_seq_len = seqs.size(1)
-
-
-                tgt_padding_mask = (seqs == pad_idx).to(device) # [current_beam_size, current_seq_len]
-                tgt_mask = nn.Transformer.generate_square_subsequent_mask(current_seq_len, device=device) # [current_seq_len, current_seq_len]
-
-
-                if single_memory.size(0) != current_beam_size:
-                     single_memory = memory[b:b+1].expand(current_beam_size, -1, -1)
-                     single_src_padding_mask = src_padding_mask[b:b+1].expand(current_beam_size, -1)
-
-                # --- Decoder Forward Pass ---
-                output = self.transformer_decoder(
-                    tgt=tgt_emb,
-                    memory=single_memory,
-                    tgt_mask=tgt_mask,
-                    tgt_key_padding_mask=tgt_padding_mask,
-                    memory_key_padding_mask=single_src_padding_mask
-                )
-                # output: [current_beam_size, current_seq_len, d_model]
-
-
-                next_token_logits = self.output_layer(output[:, -1, :]) # [current_beam_size, vocab_size]
-                next_token_log_probs = torch.log_softmax(next_token_logits, dim=-1) # [current_beam_size, vocab_size]
-
-                cumulative_scores = top_k_scores.unsqueeze(1) + next_token_log_probs
-
-                beam_k = beam_size # Number of candidates to consider for the next step
-                if step == 1:
-                     flat_scores = cumulative_scores.flatten() # [vocab_size]
-                     num_candidates = min(beam_k, flat_scores.numel())
-                     top_k_scores, top_k_indices = flat_scores.topk(num_candidates) # [k], [k]
-                     beam_indices = torch.zeros_like(top_k_indices) # All came from beam 0
-                     next_word_indices = top_k_indices % next_token_log_probs.size(1) # Word indices
-                else:
-                     flat_scores = cumulative_scores.flatten() # [current_beam_size * vocab_size]
-                     num_candidates = min(beam_k, flat_scores.numel())
-                     top_k_scores, top_k_indices = flat_scores.topk(num_candidates) # [k], [k]
-                     beam_indices = top_k_indices // next_token_log_probs.size(1) # [k] -> Beam index
-                     next_word_indices = top_k_indices % next_token_log_probs.size(1) # [k] -> Word index
-
-                next_seqs = []
-                next_beam_indices = [] # Track which beams survive
-                for i in range(len(top_k_indices)):
-                    beam_idx = beam_indices[i]
-                    next_word_idx = next_word_indices[i]
-                    score = top_k_scores[i]
-
-                    base_seq = seqs[beam_idx]
-                    new_seq = torch.cat([base_seq, next_word_idx.view(1)])
-
-                    if next_word_idx == eos_id:
-                        complete_seqs.append(new_seq.tolist())
-                        complete_seqs_scores.append(score.item())
-                    else:
-                        next_seqs.append(new_seq)
-                        next_beam_indices.append(beam_idx) # Keep track of origin beam (needed if stateful)
-
-                if not next_seqs: # If all sequences ended
+        
+        # 我们将分别处理每个batch item
+        results = []
+        
+        for batch_idx in range(batch_size):
+            # 提取单个batch item
+            src_item = src[batch_idx:batch_idx+1]  # 保持维度 [1, src_len]
+            
+            # 准备encoder输出
+            src_padding_mask = (src_item == pad_id).to(device)
+            src_emb = self.positional_encoding(self.src_embedding(src_item) * math.sqrt(self.d_model))
+            memory = self.transformer_encoder(src_emb, src_key_padding_mask=src_padding_mask)
+            
+            # 初始化beams
+            start_token = torch.tensor([[bos_id]], dtype=torch.long, device=device)
+            beams = [(start_token, 0.0)]
+            final_beams = []
+            
+            for _ in range(max_len - 1):
+                candidates = []
+                
+                # 对每个beam进行扩展
+                for beam_seq, beam_score in beams:
+                    if beam_seq[0, -1].item() == eos_id:
+                        final_beams.append((beam_seq, beam_score))
+                        continue
+                        
+                    # 准备decoder输入
+                    tgt_padding_mask = (beam_seq == pad_id).to(device)
+                    tgt_mask = nn.Transformer.generate_square_subsequent_mask(beam_seq.size(1)).to(device)
+                    
+                    # 获取decoder输出
+                    tgt_emb = self.positional_encoding(self.tgt_embedding(beam_seq) * math.sqrt(self.d_model))
+                    out = self.transformer_decoder(
+                        tgt=tgt_emb,
+                        memory=memory,
+                        tgt_mask=tgt_mask,
+                        tgt_key_padding_mask=tgt_padding_mask,
+                        memory_key_padding_mask=src_padding_mask
+                    )
+                    
+                    # 获取最后一个时间步的预测
+                    last_output = out[:, -1, :]
+                    logits = self.output_layer(last_output)
+                    log_probs = F.log_softmax(logits, dim=-1)
+                    
+                    # 获取top-k个候选
+                    topk_log_probs, topk_indices = log_probs.topk(beam_size, dim=-1)
+                    
+                    # 扩展beam
+                    for k in range(beam_size):
+                        candidate_seq = torch.cat([beam_seq, topk_indices[:, k:k+1]], dim=1)
+                        candidate_score = beam_score - topk_log_probs[:, k].item()  # 使用item()而不是mean()
+                        candidates.append((candidate_seq, candidate_score))
+                
+                # 选择最好的beam_size个候选
+                candidates.sort(key=lambda x: x[1])
+                beams = candidates[:beam_size]
+                
+                # 检查是否所有beam都生成了EOS
+                if all(beam_seq[0, -1].item() == eos_id for beam_seq, _ in beams):
                     break
-
-                seqs = torch.stack(next_seqs) # [new_beam_size, new_seq_len]
-                survivor_indices = [i for i, next_word_idx in enumerate(next_word_indices) if next_word_idx != eos_id]
-                if not survivor_indices: # Check if list is empty
-                     if not complete_seqs: # If no survivors and no completed sequences, something is wrong
-                          print("Warning: Beam search ended with no completed or surviving sequences.")
-                          if seqs.numel() > 0: # Check if seqs was populated before this check
-                                best_incomplete_idx = top_k_scores.argmax().item() # Fallback: best score overall
-                                final_outputs.append(seqs[best_incomplete_idx]) # Add the best tensor
-                          else: # If seqs is empty, maybe add BOS or handle error
-                                final_outputs.append(torch.tensor([bos_id, eos_id], device=device)) # Default fallback
-
-                     break # Exit loop if no survivors
-
-                valid_survivor_indices = torch.tensor(survivor_indices, device=device).long()
-                if valid_survivor_indices.numel() > 0 :
-                    top_k_scores = top_k_scores[valid_survivor_indices]
-                else:
-                     print("Warning: No valid survivor indices found, breaking beam search.")
-                     break
-
-
-                current_beam_size = seqs.size(0)
-                if current_beam_size == 0: # Should be covered by checks above, but safeguard
-                     break
-
-                step += 1
-
-
-            if not complete_seqs: # If no sequence reached EOS
-                 if seqs.numel() > 0 : # Check if seqs has elements
-                    best_seq_tensor = seqs[top_k_scores.argmax()]
-                    final_outputs.append(best_seq_tensor)
-                 else:
-                    final_outputs.append(torch.tensor([bos_id, eos_id], device=device))
-
-            else:
-                best_score_idx = complete_seqs_scores.index(max(complete_seqs_scores))
-                best_seq_list = complete_seqs[best_score_idx]
-                final_outputs.append(torch.tensor(best_seq_list, device=device))
-
-
-        max_batch_len = 0
-        for seq in final_outputs:
-            if seq.numel() > max_batch_len:
-                 max_batch_len = seq.numel()
-
-        max_batch_len = max(1, max_batch_len)
-        padded_outputs = torch.full((batch_size, max_batch_len), pad_id, dtype=torch.long, device=device)
-
-        for i, seq in enumerate(final_outputs):
-            current_len = seq.numel()
-            if current_len > 0 : # Ensure sequence is not empty before slicing
-                padded_outputs[i, :current_len] = seq
-
-        return padded_outputs
+            
+            # 将未完成的beam添加到final_beams
+            final_beams.extend(beams)
+            
+            # 选择得分最高的beam
+            final_beams.sort(key=lambda x: x[1])
+            best_beam = final_beams[0][0]  # 只取最好的一个beam
+            results.append(best_beam)  # 添加到结果列表
+        
+        return results
