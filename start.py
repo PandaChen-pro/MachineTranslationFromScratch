@@ -31,15 +31,15 @@ def parse_args():
     parser.add_argument('--data_dir', type=str, default='processed_data', help='处理数据保存目录')
 
     # --- 模型相关 ---
-    parser.add_argument('--d_model', type=int, default=512, help='模型维度')
+    parser.add_argument('--d_model', type=int, default=384, help='模型维度')
     parser.add_argument('--nhead', type=int, default=8, help='注意力头数')
-    parser.add_argument('--num_encoder_layers', type=int, default=6, help='编码器层数')
-    parser.add_argument('--num_decoder_layers', type=int, default=6, help='解码器层数')
-    parser.add_argument('--dim_feedforward', type=int, default=2048, help='前馈网络维度')
-    parser.add_argument('--dropout', type=float, default=0.3, help='dropout率')
+    parser.add_argument('--num_encoder_layers', type=int, default=4, help='编码器层数')
+    parser.add_argument('--num_decoder_layers', type=int, default=4, help='解码器层数')
+    parser.add_argument('--dim_feedforward', type=int, default=1536, help='前馈网络维度')
+    parser.add_argument('--dropout', type=float, default=0.2, help='dropout率')
 
     # --- 训练相关 ---
-    parser.add_argument('--epochs', type=int, default=80, help='训练轮数')
+    parser.add_argument('--epochs', type=int, default=50, help='训练轮数')
     parser.add_argument('--batch_size', type=int, default=64, help='批次大小')
     parser.add_argument('--lr', type=float, default=5e-4, help='基础学习率')
     parser.add_argument('--warmup_steps', type=int, default=4000, help='Noam优化器预热步数')
@@ -62,8 +62,8 @@ def parse_args():
 
     # --- wandb相关 ---
     parser.add_argument('--use_wandb', action='store_true', help='是否使用wandb记录训练')
-    parser.add_argument('--wandb_project', type=str, default='nmt-transformer', help='wandb项目名')
-    parser.add_argument('--wandb_name', type=str, default='zh-en-transformer', help='wandb运行名')
+    parser.add_argument('--wandb_project', type=str, default='nmt-noam-transformer', help='wandb项目名')
+    parser.add_argument('--wandb_name', type=str, default='zh-en-noam-noam-transformer', help='wandb运行名')
     parser.add_argument('--resume_wandb', action='store_true', help='是否恢复wandb运行')
 
     # --- 运行模式 ---
@@ -137,9 +137,13 @@ def main():
         data_dir=args.data_dir
     )
 
+
     # 训练模式
     if args.mode == 'train':
         # 构建数据集
+        train_src, train_tgt = train_data
+        val_src, val_tgt = val_data
+        
         train_dataset = TranslationDataset(train_src, train_tgt, args.max_len)
         val_dataset = TranslationDataset(val_src, val_tgt, args.max_len)
 
@@ -212,6 +216,7 @@ def main():
         print(f"Target vocabulary size: {len(tgt_vocab)}")
 
         # 构建测试数据集
+        test_src, test_tgt = test_data
         test_dataset = TranslationDataset(test_src, test_tgt, args.max_len)
         test_batch_size = args.batch_size * 2  # 测试时可以用更大的批次
         test_loader = get_dataloader(test_dataset, test_batch_size, src_vocab, tgt_vocab)

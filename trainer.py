@@ -10,7 +10,6 @@ import sacrebleu
 from tqdm import tqdm
 import random
 
-# 导入工具函数
 from util import save_checkpoint, load_checkpoint
 
 class LabelSmoothingLoss(nn.Module):
@@ -42,6 +41,35 @@ class LabelSmoothingLoss(nn.Module):
         return self.criterion(x, true_dist) / non_pad_count
 
 class NoamOpt:
+    """Noam优化器实现"""
+    def __init__(self, model_size, factor, warmup, optimizer):
+        self.optimizer = optimizer
+        self._step = 0
+        self.warmup = warmup
+        self.factor = factor
+        self.model_size = model_size
+        self._rate = 0
+        self.param_groups = optimizer.param_groups  
+        
+    def step(self):
+        "更新参数和学习率"
+        self._step += 1
+        rate = self.rate()
+        for p in self.optimizer.param_groups:
+            p['lr'] = rate
+        self._rate = rate
+        self.optimizer.step()
+        
+    def rate(self, step = None):
+        "实现学习率预热和衰减"
+        if step is None:
+            step = self._step
+        return self.factor * \
+            (self.model_size ** (-0.5) * \
+            min(step ** (-0.5), step * self.warmup ** (-1.5)))
+    
+    def zero_grad(self):
+        self.optimizer.zero_grad()
     """
     Noam优化器实现，基于Transformer论文的学习率调度
     """
@@ -79,21 +107,22 @@ class NoamOpt:
 
 class Trainer:
     def __init__(self, model, train_loader, val_loader, src_vocab, tgt_vocab,
-                 config, device, checkpoint_dir='checkpoints'):
+                 config, device, checkpoint_dir='checkpoints', data_dir='data'):
         """
         初始化Trainer
-        """
-        self.model = model
-        self.train_loader = train_loader
-        self.val_loader = val_loader
-        self.src_vocab = src_vocab
-        self.tgt_vocab = tgt_vocab
-        self.config = config
-        self.device = device
-        self.checkpoint_dir = checkpoint_dir
+        Initializes the Trainer.
 
-        os.makedirs(checkpoint_dir, exist_ok=True)
-
+        Args:
+            model (nn.Module): The Transformer model.
+            train_loader (DataLoader): DataLoader for the training set.
+            val_loader (DataLoader): DataLoader for the validation/test set.
+            src_vocab (Vocabulary): Source language vocabulary.
+            tgt_vocab (Vocabulary): Target language vocabulary.
+            config (dict): Configuration dictionary containing hyperparameters.
+            device (torch.device): Device to run training on (e.g., 'cuda', 'cpu').
+            checkpoint_dir (str): Directory to save checkpoints.
+            data_dir (str): Directory to save/load datasets.
+            
         # --- 创建Noam优化器 ---
         base_lr = config.get('learning_rate', 3e-4)
         warmup_steps = config.get('warmup_steps', 4000)
@@ -103,8 +132,15 @@ class Trainer:
             model.parameters(),
             lr=base_lr,
             betas=(0.9, 0.98),
-            eps=1e-9,
-            weight_decay=1e-4
+            eps=1e-9
+        )
+        
+        # 使用Noam优化器
+        self.optimizer = NoamOpt(
+            model_size=config['d_model'],
+            factor=config.get('factor', 1),
+            warmup=config.get('warmup_steps', 4000),
+            optimizer=base_optimizer
         )
         
         # 创建Noam优化器包装器
@@ -168,7 +204,7 @@ class Trainer:
             # 监视模型（如果wandb运行处于活动状态）
             if self.use_wandb and self.wandb_run:
                 wandb.watch(model, log_freq=100)
-
+                
     def _train_epoch(self, epoch):
         """训练一个epoch"""
         self.model.train()
@@ -249,6 +285,8 @@ class Trainer:
                 if i >= num_batches_to_eval:
                     break
 
+        with torch.no_grad():
+            for batch in tqdm(self.val_loader, desc="Evaluating"):
                 src = batch['src'].to(self.device)
                 tgt = batch['tgt'].to(self.device)
 
@@ -306,7 +344,12 @@ class Trainer:
         else:
             print("Warning: No hypotheses or references generated for BLEU calculation.")
 
-        avg_loss = total_loss / num_batches_to_eval if num_batches_to_eval > 0 else 0
+        if self.use_wandb:
+            self.wandb_run.log({
+                'val_loss': avg_loss,
+                'val_bleu': bleu_score,
+                'epoch': self.start_epoch
+            })
 
         # 保存检查点（仅在训练模式下）
         if self.train_loader is not None:
