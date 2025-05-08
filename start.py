@@ -31,18 +31,18 @@ def parse_args():
     parser.add_argument('--data_dir', type=str, default='processed_data', help='处理数据保存目录')
 
     # --- 模型相关 ---
-    parser.add_argument('--d_model', type=int, default=512, help='模型维度')
+    parser.add_argument('--d_model', type=int, default=384, help='模型维度')
     parser.add_argument('--nhead', type=int, default=8, help='注意力头数')
-    parser.add_argument('--num_encoder_layers', type=int, default=6, help='编码器层数')
-    parser.add_argument('--num_decoder_layers', type=int, default=6, help='解码器层数')
-    parser.add_argument('--dim_feedforward', type=int, default=2048, help='前馈网络维度')
-    parser.add_argument('--dropout', type=float, default=0.3, help='dropout率')
+    parser.add_argument('--num_encoder_layers', type=int, default=4, help='编码器层数')
+    parser.add_argument('--num_decoder_layers', type=int, default=4, help='解码器层数')
+    parser.add_argument('--dim_feedforward', type=int, default=1536, help='前馈网络维度')
+    parser.add_argument('--dropout', type=float, default=0.2, help='dropout率')
 
     # --- 训练相关 ---
-    parser.add_argument('--epochs', type=int, default=80, help='训练轮数')
+    parser.add_argument('--epochs', type=int, default=50, help='训练轮数')
     parser.add_argument('--batch_size', type=int, default=64, help='批次大小')
     parser.add_argument('--lr', type=float, default=5e-4, help='基础学习率')
-    parser.add_argument('--warmup_steps', type=int, default=4000, help='Noam优化器预热步数')
+    parser.add_argument('--warmup_steps', type=int, default=1000, help='Noam优化器预热步数')
     parser.add_argument('--clip_grad', type=float, default=1.0, help='梯度裁剪阈值')
     parser.add_argument('--seed', type=int, default=3407, help='随机种子')
     parser.add_argument('--max_len', type=int, default=100, help='最大序列长度')
@@ -62,8 +62,8 @@ def parse_args():
 
     # --- wandb相关 ---
     parser.add_argument('--use_wandb', action='store_true', help='是否使用wandb记录训练')
-    parser.add_argument('--wandb_project', type=str, default='nmt-transformer', help='wandb项目名')
-    parser.add_argument('--wandb_name', type=str, default='zh-en-transformer', help='wandb运行名')
+    parser.add_argument('--wandb_project', type=str, default='nmt-noam-transformer', help='wandb项目名')
+    parser.add_argument('--wandb_name', type=str, default='zh-en-noam-transformer', help='wandb运行名')
     parser.add_argument('--resume_wandb', action='store_true', help='是否恢复wandb运行')
 
     # --- 运行模式 ---
