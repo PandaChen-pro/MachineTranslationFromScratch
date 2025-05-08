@@ -67,7 +67,7 @@ def parse_args():
     # --- wandb相关 ---
     parser.add_argument('--use_wandb', action='store_true', help='是否使用wandb记录训练')
     parser.add_argument('--wandb_project', type=str, default='nmt-noam-transformer', help='wandb项目名')
-    parser.add_argument('--wandb_name', type=str, default='zh-en-noam-noam-transformer', help='wandb运行名')
+    parser.add_argument('--wandb_name', type=str, default='zh-en-noam-transformer', help='wandb运行名')
     parser.add_argument('--resume_wandb', action='store_true', help='是否恢复wandb运行')
 
     # --- 运行模式 ---
