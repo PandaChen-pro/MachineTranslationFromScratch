@@ -3,6 +3,7 @@ from torch.utils.data import Dataset, DataLoader
 import torch.nn.utils.rnn as rnn_utils
 import os
 import random
+import pickle
 
 class Vocabulary:
     def __init__(self, pad_token="<pad>", unk_token="<unk>", 
@@ -176,9 +177,26 @@ class TranslationDataset(Dataset):
                 'tgt_text': ' '.join(tgt_tokens)
             }
 
-def load_and_split_data(src_file, tgt_file, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1, seed=42):
+def save_processed_data(data, file_path):
+    """保存处理过的数据到磁盘"""
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, 'wb') as f:
+        pickle.dump(data, f)
+    print(f"数据已保存到: {file_path}")
+
+def load_processed_data(file_path):
+    """从磁盘加载处理过的数据"""
+    if not os.path.exists(file_path):
+        return None
+    with open(file_path, 'rb') as f:
+        data = pickle.load(f)
+    print(f"数据已从 {file_path} 加载")
+    return data
+
+def load_and_split_data(src_file, tgt_file, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1, 
+                        seed=42, data_dir="processed_data"):
     """
-    加载并分割数据为训练集、验证集和测试集
+    加载并分割数据为训练集、验证集和测试集，支持保存和加载处理过的数据
     
     Args:
         src_file: 源语言文件路径
@@ -187,12 +205,27 @@ def load_and_split_data(src_file, tgt_file, train_ratio=0.8, val_ratio=0.1, test
         val_ratio: 验证集比例
         test_ratio: 测试集比例
         seed: 随机种子
+        data_dir: 处理后数据存储目录
     
     Returns:
         train_src, train_tgt, val_src, val_tgt, test_src, test_tgt
     """
     # 确保比例之和为1
     assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "比例之和必须为1"
+    
+    # 创建数据存储目录
+    os.makedirs(data_dir, exist_ok=True)
+    
+    # 构建保存文件路径
+    data_path = os.path.join(data_dir, f"split_data_tr{train_ratio}_vl{val_ratio}_ts{test_ratio}_s{seed}.pkl")
+    
+    # 尝试加载已处理的数据
+    loaded_data = load_processed_data(data_path)
+    if loaded_data:
+        train_src, train_tgt, val_src, val_tgt, test_src, test_tgt = loaded_data
+        print(f"数据集已加载，总计 {len(train_src) + len(val_src) + len(test_src)} 条数据")
+        print(f"训练集: {len(train_src)} 条，验证集: {len(val_src)} 条，测试集: {len(test_src)} 条")
+        return train_src, train_tgt, val_src, val_tgt, test_src, test_tgt
     
     # 读取源语言和目标语言文件
     with open(src_file, 'r', encoding='utf-8') as f:
@@ -229,6 +262,10 @@ def load_and_split_data(src_file, tgt_file, train_ratio=0.8, val_ratio=0.1, test
     
     print(f"数据集分割完成，总计 {total_size} 条数据")
     print(f"训练集: {len(train_src)} 条，验证集: {len(val_src)} 条，测试集: {len(test_src)} 条")
+    
+    # 保存处理过的数据
+    data_to_save = (train_src, train_tgt, val_src, val_tgt, test_src, test_tgt)
+    save_processed_data(data_to_save, data_path)
     
     return train_src, train_tgt, val_src, val_tgt, test_src, test_tgt
 
