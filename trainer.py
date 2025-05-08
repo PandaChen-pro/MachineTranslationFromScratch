@@ -354,7 +354,7 @@ class Trainer:
         """翻译指定的测试句子并返回结果"""
         oov_chars = []
         for char in sentence:
-            if char not in self.src_vocab.get_vocab():
+            if char not in self.src_vocab.token2idx:
                 oov_chars.append(char)
         
         if oov_chars:

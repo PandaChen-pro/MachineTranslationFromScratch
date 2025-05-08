@@ -53,7 +53,7 @@ def parse_args():
     parser.add_argument('--use_beam_search', action='store_true', help='使用束搜索进行解码')
     parser.add_argument('--length_penalty', type=float, default=1.0, help='束搜索长度惩罚')
     parser.add_argument('--fast_eval', action='store_true', help='使用快速评估模式')
-    parser.add_argument('--fast_eval_size', type=int, default=5000, help='快速评估样本数量')
+    parser.add_argument('--fast_eval_size', type=int, default=8000, help='快速评估样本数量')
 
     # --- 路径相关 ---
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help='检查点目录')
