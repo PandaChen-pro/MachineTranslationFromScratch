@@ -247,6 +247,10 @@ class Trainer:
                 print("Warning: Cannot determine batch size for fast evaluation. Evaluating all batches.")
                 num_batches_to_eval = len(self.val_loader)
 
+        # 添加特定句子的翻译测试
+        test_sentence = "中国科学院成都计算机应用研究所"
+        test_translation = self._translate_test_sentence(test_sentence)
+
         with torch.no_grad():
             for i, batch in enumerate(tqdm(self.val_loader, desc=eval_desc, leave=False)):
                 if i >= num_batches_to_eval:
@@ -285,7 +289,7 @@ class Trainer:
                 for j in range(translated_ids.size(0)):
                     # 解码假设（预测）
                     hyp_text = self.tgt_vocab.decode(translated_ids[j], skip_special_tokens=True)
-                    # 解码参考（地面真相）
+                    # 解码参考
                     ref_text = self.tgt_vocab.decode(tgt[j], skip_special_tokens=True)
 
                     hypotheses.append(hyp_text)
@@ -312,6 +316,14 @@ class Trainer:
 
         avg_loss = total_loss / num_batches_to_eval if num_batches_to_eval > 0 else 0
 
+        # 记录特定句子的翻译结果到wandb
+        if self.use_wandb and self.wandb_run:
+            translation_table = wandb.Table(columns=["Source", "Translation"])
+            translation_table.add_data(test_sentence, test_translation)
+            wandb.log({
+                'test_sentence_translation': translation_table,
+            }, commit=False)  # 与其他指标一起记录
+
         # 保存检查点（仅在训练模式下）
         if self.train_loader is not None:
             current_epoch = getattr(self, 'epoch_count', self.start_epoch)
@@ -337,6 +349,43 @@ class Trainer:
             }, False, self.checkpoint_dir, filename='checkpoint.pt')
 
         return avg_loss, bleu
+
+    def _translate_test_sentence(self, sentence):
+        """翻译指定的测试句子并返回结果"""
+        oov_chars = []
+        for char in sentence:
+            if char not in self.src_vocab.get_vocab():
+                oov_chars.append(char)
+        
+        if oov_chars:
+            print(f"警告：句子中有{len(oov_chars)}个字符不在词汇表中: {' '.join(oov_chars)}")
+        # 将句子编码为模型输入格式
+        tokens = self.src_vocab.encode(sentence)
+        print(f"分词结果: {tokens}")
+        src_tensor = torch.tensor([tokens], device=self.device)
+        
+        # 确定解码方法
+        use_beam = self.config.get('use_beam_search', False)
+        max_len = self.config.get('max_len', 100)
+        beam_size = self.config.get('beam_size', 5)
+        
+        # 翻译句子
+        with torch.no_grad():
+            if use_beam:
+                translated_ids = self.model.beam_search(
+                    src_tensor, 
+                    max_len=max_len, 
+                    beam_size=beam_size,
+                    length_penalty=self.config.get('length_penalty', 1.0)
+                )
+            else:
+                translated_ids = self.model.greedy_decode(src_tensor, max_len=max_len)
+        
+        # 解码翻译结果
+        translation = self.tgt_vocab.decode(translated_ids[0], skip_special_tokens=True)
+        
+        print(f"测试句子翻译: '{sentence}' -> '{translation}'")
+        return translation
 
     def train(self, epochs):
         """主训练循环"""
