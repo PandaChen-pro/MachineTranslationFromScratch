@@ -3,10 +3,8 @@ import os
 import torch
 import wandb
 from tqdm import tqdm
-import nltk
-import math 
-import pickle
-import json
+import math
+import sacrebleu
 
 from dataset_loader import (
     TranslationDataset,
@@ -14,13 +12,12 @@ from dataset_loader import (
     get_dataloader,
     Vocabulary,
     load_and_split_data,
-    save_dataset,
-    load_dataset
+    save_processed_data,
+    load_processed_data
 )
 from model import TransformerModel
 from trainer import Trainer
-from util import set_seed, write_translations, get_device, count_parameters # Assumed to exist
-
+from util import set_seed, write_translations, get_device, count_parameters
 
 def parse_args():
     parser = argparse.ArgumentParser(description='中英神经机器翻译')
@@ -31,8 +28,7 @@ def parse_args():
     parser.add_argument('--train_ratio', type=float, default=0.8, help='训练集比例')
     parser.add_argument('--val_ratio', type=float, default=0.1, help='验证集比例')
     parser.add_argument('--test_ratio', type=float, default=0.1, help='测试集比例')
-    parser.add_argument('--save_dir', type=str, default='./split_data', help='数据集保存目录')
-    parser.add_argument('--load_saved_data', action='store_true', help='是否加载已保存的数据集')
+    parser.add_argument('--data_dir', type=str, default='processed_data', help='处理数据保存目录')
 
     # --- 模型相关 ---
     parser.add_argument('--d_model', type=int, default=384, help='模型维度')
@@ -45,19 +41,19 @@ def parse_args():
     # --- 训练相关 ---
     parser.add_argument('--epochs', type=int, default=50, help='训练轮数')
     parser.add_argument('--batch_size', type=int, default=64, help='批次大小')
-    parser.add_argument('--lr', type=float, default=5e-4, help='基础学习率 (Warmup 后的最大学习率)')
-    parser.add_argument('--warmup_steps', type=int, default=1000, help='学习率预热步数') 
-    parser.add_argument('--factor', type=float, default=1.0, help='Noam优化器的因子')
+    parser.add_argument('--lr', type=float, default=5e-4, help='基础学习率')
+    parser.add_argument('--warmup_steps', type=int, default=4000, help='Noam优化器预热步数')
     parser.add_argument('--clip_grad', type=float, default=1.0, help='梯度裁剪阈值')
     parser.add_argument('--seed', type=int, default=3407, help='随机种子')
     parser.add_argument('--max_len', type=int, default=100, help='最大序列长度')
-    parser.add_argument('--patience', type=int, default=5, help='早停耐心值，连续多少个epoch无改善后停止训练')
+    parser.add_argument('--label_smoothing', type=float, default=0.1, help='标签平滑系数')
 
     # --- 推理相关 ---
     parser.add_argument('--beam_size', type=int, default=3, help='束搜索宽度')
     parser.add_argument('--use_beam_search', action='store_true', help='使用束搜索进行解码')
+    parser.add_argument('--length_penalty', type=float, default=1.0, help='束搜索长度惩罚')
     parser.add_argument('--fast_eval', action='store_true', help='使用快速评估模式')
-    parser.add_argument('--fast_eval_size', type=int, default=2000, help='快速评估样本数量') 
+    parser.add_argument('--fast_eval_size', type=int, default=5000, help='快速评估样本数量')
 
     # --- 路径相关 ---
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help='检查点目录')
@@ -92,17 +88,9 @@ def main():
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     os.makedirs(args.vocab_dir, exist_ok=True)
     os.makedirs(args.output_dir, exist_ok=True)
-    os.makedirs(args.save_dir, exist_ok=True)
+    os.makedirs(args.data_dir, exist_ok=True)
 
-    # 确保nltk的bleu评估所需资源已下载
-    try:
-        nltk.data.find('tokenizers/punkt')
-    except LookupError:
-        print("Downloading nltk 'punkt' tokenizer...")
-        nltk.download('punkt')
-        print("Download complete.")
-
-    # --- 创建配置字典 --- (Ensure all necessary args are passed)
+    # --- 创建配置字典 ---
     config = {
         'd_model': args.d_model,
         'nhead': args.nhead,
@@ -111,22 +99,22 @@ def main():
         'dim_feedforward': args.dim_feedforward,
         'dropout': args.dropout,
         'learning_rate': args.lr,
-        'warmup_steps': args.warmup_steps,          
-        'factor': args.factor,
+        'warmup_steps': args.warmup_steps,
         'clip_grad': args.clip_grad,
         'max_len': args.max_len,
-        'batch_size': args.batch_size,               
-        'epochs': args.epochs,                     
+        'batch_size': args.batch_size,
+        'epochs': args.epochs,
         'beam_size': args.beam_size,
         'use_beam_search': args.use_beam_search,
+        'length_penalty': args.length_penalty,
+        'label_smoothing': args.label_smoothing,
         'use_wandb': args.use_wandb,
         'wandb_project': args.wandb_project,
         'wandb_name': args.wandb_name,
         'resume_wandb': args.resume_wandb,
         'resume_training': args.resume_training,
         'fast_eval': args.fast_eval,
-        'fast_eval_size': args.fast_eval_size,
-        'patience': args.patience
+        'fast_eval_size': args.fast_eval_size
     }
 
     if args.use_wandb:
@@ -137,112 +125,21 @@ def main():
             args.use_wandb = False
             config['use_wandb'] = False
 
-    # 准备数据集
-    if args.load_saved_data and os.path.exists(args.save_dir):
-        print("加载已保存的数据集...")
-        
-        try:
-            # 加载数据集
-            with open(os.path.join(args.save_dir, 'train_src.pkl'), 'rb') as f:
-                train_src = pickle.load(f)
-            with open(os.path.join(args.save_dir, 'train_tgt.pkl'), 'rb') as f:
-                train_tgt = pickle.load(f)
-            
-            with open(os.path.join(args.save_dir, 'val_src.pkl'), 'rb') as f:
-                val_src = pickle.load(f)
-            with open(os.path.join(args.save_dir, 'val_tgt.pkl'), 'rb') as f:
-                val_tgt = pickle.load(f)
-            
-            with open(os.path.join(args.save_dir, 'test_src.pkl'), 'rb') as f:
-                test_src = pickle.load(f)
-            with open(os.path.join(args.save_dir, 'test_tgt.pkl'), 'rb') as f:
-                test_tgt = pickle.load(f)
-            
-            # 加载数据集信息
-            with open(os.path.join(args.save_dir, 'dataset_info.json'), 'r', encoding='utf-8') as f:
-                dataset_info = json.load(f)
-            
-            print(f"已加载数据集:")
-            print(f"训练集: {dataset_info['train_size']} 条")
-            print(f"验证集: {dataset_info['val_size']} 条")
-            print(f"测试集: {dataset_info['test_size']} 条")
-            
-            train_data = (train_src, train_tgt)
-            val_data = (val_src, val_tgt)
-            test_data = (test_src, test_tgt)
-            
-        except Exception as e:
-            print(f"加载数据集失败: {e}，将创建新的数据集...")
-            args.load_saved_data = False
-            
-    if not args.load_saved_data:
-        print("创建新的数据集...")
-        # 读取源语言和目标语言文件
-        with open(args.src_file, 'r', encoding='utf-8') as f:
-            src_sentences = [line.strip() for line in f]
-        
-        with open(args.tgt_file, 'r', encoding='utf-8') as f:
-            tgt_sentences = [line.strip() for line in f]
-            
-        # 创建数据集对象
-        dataset = TranslationDataset(src_sentences, tgt_sentences, args.max_len)
-        # 划分数据集
-        (train_src, train_tgt), (val_src, val_tgt), (test_src, test_tgt) = dataset.split_data(
-            train_ratio=args.train_ratio,
-            val_ratio=args.val_ratio,
-            test_ratio=args.test_ratio
-        )
-        # 保存数据集
-        train_src_path = os.path.join(args.save_dir, 'train_src.pkl')
-        train_tgt_path = os.path.join(args.save_dir, 'train_tgt.pkl')
-        val_src_path = os.path.join(args.save_dir, 'val_src.pkl')
-        val_tgt_path = os.path.join(args.save_dir, 'val_tgt.pkl')
-        test_src_path = os.path.join(args.save_dir, 'test_src.pkl')
-        test_tgt_path = os.path.join(args.save_dir, 'test_tgt.pkl')
-        
-        os.makedirs(args.save_dir, exist_ok=True)
-        
-        # 保存数据集
-        with open(train_src_path, 'wb') as f:
-            pickle.dump(train_src, f)
-        with open(train_tgt_path, 'wb') as f:
-            pickle.dump(train_tgt, f)
-        
-        with open(val_src_path, 'wb') as f:
-            pickle.dump(val_src, f)
-        with open(val_tgt_path, 'wb') as f:
-            pickle.dump(val_tgt, f)
-        
-        with open(test_src_path, 'wb') as f:
-            pickle.dump(test_src, f)
-        with open(test_tgt_path, 'wb') as f:
-            pickle.dump(test_tgt, f)
-        
-        # 保存数据集信息
-        dataset_info = {
-            'train_size': len(train_src),
-            'val_size': len(val_src),
-            'test_size': len(test_src)
-        }
-        
-        with open(os.path.join(args.save_dir, 'dataset_info.json'), 'w', encoding='utf-8') as f:
-            json.dump(dataset_info, f, ensure_ascii=False, indent=2)
-        
-        print(f"数据集已保存到 {args.save_dir} 目录")
-        print(f"训练集: {dataset_info['train_size']} 条")
-        print(f"验证集: {dataset_info['val_size']} 条")
-        print(f"测试集: {dataset_info['test_size']} 条")
-        
-        train_data = (train_src, train_tgt)
-        val_data = (val_src, val_tgt)
-        test_data = (test_src, test_tgt)
+    # 加载并分割数据
+    print("Loading and splitting data...")
+    train_src, train_tgt, val_src, val_tgt, test_src, test_tgt = load_and_split_data(
+        args.src_file,
+        args.tgt_file,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
+        seed=args.seed,
+        data_dir=args.data_dir
+    )
 
     # 训练模式
     if args.mode == 'train':
         # 构建数据集
-        train_src, train_tgt = train_data
-        val_src, val_tgt = val_data
-        
         train_dataset = TranslationDataset(train_src, train_tgt, args.max_len)
         val_dataset = TranslationDataset(val_src, val_tgt, args.max_len)
 
@@ -269,43 +166,28 @@ def main():
         val_loader = get_dataloader(val_dataset, args.batch_size, src_vocab, tgt_vocab)
 
         # 创建模型
-        model_path_to_check = os.path.join(args.checkpoint_dir, 'checkpoint.pt')
-        if args.resume_training and os.path.exists(model_path_to_check):
-             print(f"Resuming training, attempting to load model from {model_path_to_check}...")
-             model = TransformerModel(
-                 src_vocab_size=len(src_vocab),
-                 tgt_vocab_size=len(tgt_vocab),
-                 d_model=args.d_model,
-                 nhead=args.nhead,
-                 num_encoder_layers=args.num_encoder_layers,
-                 num_decoder_layers=args.num_decoder_layers,
-                 dim_feedforward=args.dim_feedforward,
-                 dropout=args.dropout
-             )
-        else:
-            print("Creating new model...")
-            model = TransformerModel(
-                src_vocab_size=len(src_vocab),
-                tgt_vocab_size=len(tgt_vocab),
-                d_model=args.d_model,
-                nhead=args.nhead,
-                num_encoder_layers=args.num_encoder_layers,
-                num_decoder_layers=args.num_decoder_layers,
-                dim_feedforward=args.dim_feedforward,
-                dropout=args.dropout
-            )
-
+        model = TransformerModel(
+            src_vocab_size=len(src_vocab),
+            tgt_vocab_size=len(tgt_vocab),
+            d_model=args.d_model,
+            nhead=args.nhead,
+            num_encoder_layers=args.num_encoder_layers,
+            num_decoder_layers=args.num_decoder_layers,
+            dim_feedforward=args.dim_feedforward,
+            dropout=args.dropout
+        )
         model = model.to(device)
+        
         print(f"Model has {count_parameters(model):,} trainable parameters")
 
-        # 创建训练器 (Pass the updated config)
+        # 创建训练器
         trainer = Trainer(
             model=model,
             train_loader=train_loader,
             val_loader=val_loader,
             src_vocab=src_vocab,
             tgt_vocab=tgt_vocab,
-            config=config, 
+            config=config,
             device=device,
             checkpoint_dir=args.checkpoint_dir
         )
@@ -322,7 +204,7 @@ def main():
         tgt_vocab_path = os.path.join(args.vocab_dir, 'tgt_vocab.pt')
 
         if not os.path.exists(src_vocab_path) or not os.path.exists(tgt_vocab_path):
-            raise FileNotFoundError("Vocabulary files not found in {args.vocab_dir}. Train a model first or provide correct path.")
+            raise FileNotFoundError(f"Vocabulary files not found in {args.vocab_dir}. Train a model first or provide correct path.")
 
         src_vocab = Vocabulary.load(src_vocab_path)
         tgt_vocab = Vocabulary.load(tgt_vocab_path)
@@ -330,18 +212,17 @@ def main():
         print(f"Target vocabulary size: {len(tgt_vocab)}")
 
         # 构建测试数据集
-        test_src, test_tgt = test_data
         test_dataset = TranslationDataset(test_src, test_tgt, args.max_len)
-        test_batch_size = args.batch_size * 2
+        test_batch_size = args.batch_size * 2  # 测试时可以用更大的批次
         test_loader = get_dataloader(test_dataset, test_batch_size, src_vocab, tgt_vocab)
 
-        # 加载模型 (Load the best model)
+        # 加载模型
         print("Loading best model for testing...")
         best_model_path = os.path.join(args.checkpoint_dir, 'best_model.pt')
         if not os.path.exists(best_model_path):
             raise FileNotFoundError(f"Best model not found at {best_model_path}. Train a model first.")
 
-        # Initialize model structure first
+        # 初始化模型结构
         model = TransformerModel(
             src_vocab_size=len(src_vocab),
             tgt_vocab_size=len(tgt_vocab),
@@ -350,7 +231,7 @@ def main():
             num_encoder_layers=args.num_encoder_layers,
             num_decoder_layers=args.num_decoder_layers,
             dim_feedforward=args.dim_feedforward,
-            dropout=args.dropout 
+            dropout=args.dropout
         )
         model = model.to(device)
 
@@ -367,26 +248,25 @@ def main():
 
         print(f"Model has {count_parameters(model):,} parameters")
 
-
-        # 创建训练器 (Needed for evaluate method, pass None for train_loader)
+        # 创建训练器
         trainer = Trainer(
             model=model,
-            train_loader=None, 
-            val_loader=test_loader, 
+            train_loader=None,
+            val_loader=test_loader,
             src_vocab=src_vocab,
             tgt_vocab=tgt_vocab,
-            config=config, 
+            config=config,
             device=device,
-            checkpoint_dir=args.checkpoint_dir 
+            checkpoint_dir=args.checkpoint_dir
         )
 
-        # 评估模型 - 在测试集上使用完整评估
+        # 评估模型
         print("Evaluating on test set...")
         test_loss, test_bleu = trainer.evaluate(fast_eval=False)
         print(f"Test Loss: {test_loss:.4f}, Test BLEU-4: {test_bleu:.4f}")
 
         # 生成翻译结果并保存
-        model.eval() 
+        model.eval()
         all_translations = []
         all_sources = []
         all_references = []
@@ -398,11 +278,16 @@ def main():
                 src_texts = batch['src_text']
                 tgt_texts = batch['tgt_text']
 
-                use_beam = args.use_beam_search
-                if use_beam:
-                     translated_ids = model.beam_search(src, max_len=args.max_len, beam_size=args.beam_size)
+                # 使用beam search或贪婪解码
+                if args.use_beam_search:
+                    translated_ids = model.beam_search(
+                        src, 
+                        max_len=args.max_len, 
+                        beam_size=args.beam_size, 
+                        length_penalty=args.length_penalty
+                    )
                 else:
-                     translated_ids = model.greedy_decode(src, max_len=args.max_len)
+                    translated_ids = model.greedy_decode(src, max_len=args.max_len)
 
                 translations = [tgt_vocab.decode(ids, skip_special_tokens=True) for ids in translated_ids]
 
@@ -410,13 +295,13 @@ def main():
                 all_references.extend(tgt_texts)
                 all_translations.extend(translations)
 
-        # 保存翻译结果 (Source, Reference, Hypothesis)
+        # 计算sacrebleu分数
+        bleu_score = sacrebleu.corpus_bleu(all_translations, [all_references], tokenize='13a')
+        print(f"SacreBLEU score: {bleu_score.score:.2f}")
+
+        # 保存翻译结果
         output_file = os.path.join(args.output_dir, 'test_translations.txt')
-        with open(output_file, 'w', encoding='utf-8') as f:
-            for src, ref, hyp in zip(all_sources, all_references, all_translations):
-                f.write(f"SRC: {src}\n")
-                f.write(f"REF: {ref}\n")
-                f.write(f"HYP: {hyp}\n\n")
+        write_translations(all_sources, all_references, all_translations, output_file)
         print(f"Test translations saved to {output_file}")
 
 if __name__ == '__main__':
