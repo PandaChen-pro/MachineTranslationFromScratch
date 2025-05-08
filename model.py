@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import math
+import torch.nn.functional as F
 
 class PositionalEncoding(nn.Module):
     """位置编码模块"""
@@ -332,3 +333,91 @@ class TransformerModel(nn.Module):
             final_results[i, :seq.size(0)] = seq
             
         return final_results
+=======
+        优化的beam search解码实现
+        
+        Args:
+            src: 源语言输入 [batch_size, src_len]
+            max_len: 最大生成长度
+            beam_size: beam大小
+            bos_id: 开始标记的ID
+            eos_id: 结束标记的ID
+            pad_id: 填充标记的ID
+            
+        Returns:
+            生成的序列列表
+        """
+        device = src.device
+        batch_size = src.size(0)
+        
+        # 我们将分别处理每个batch item
+        results = []
+        
+        for batch_idx in range(batch_size):
+            # 提取单个batch item
+            src_item = src[batch_idx:batch_idx+1]  # 保持维度 [1, src_len]
+            
+            # 准备encoder输出
+            src_padding_mask = (src_item == pad_id).to(device)
+            src_emb = self.positional_encoding(self.src_embedding(src_item) * math.sqrt(self.d_model))
+            memory = self.transformer_encoder(src_emb, src_key_padding_mask=src_padding_mask)
+            
+            # 初始化beams
+            start_token = torch.tensor([[bos_id]], dtype=torch.long, device=device)
+            beams = [(start_token, 0.0)]
+            final_beams = []
+            
+            for _ in range(max_len - 1):
+                candidates = []
+                
+                # 对每个beam进行扩展
+                for beam_seq, beam_score in beams:
+                    if beam_seq[0, -1].item() == eos_id:
+                        final_beams.append((beam_seq, beam_score))
+                        continue
+                        
+                    # 准备decoder输入
+                    tgt_padding_mask = (beam_seq == pad_id).to(device)
+                    tgt_mask = nn.Transformer.generate_square_subsequent_mask(beam_seq.size(1)).to(device)
+                    
+                    # 获取decoder输出
+                    tgt_emb = self.positional_encoding(self.tgt_embedding(beam_seq) * math.sqrt(self.d_model))
+                    out = self.transformer_decoder(
+                        tgt=tgt_emb,
+                        memory=memory,
+                        tgt_mask=tgt_mask,
+                        tgt_key_padding_mask=tgt_padding_mask,
+                        memory_key_padding_mask=src_padding_mask
+                    )
+                    
+                    # 获取最后一个时间步的预测
+                    last_output = out[:, -1, :]
+                    logits = self.output_layer(last_output)
+                    log_probs = F.log_softmax(logits, dim=-1)
+                    
+                    # 获取top-k个候选
+                    topk_log_probs, topk_indices = log_probs.topk(beam_size, dim=-1)
+                    
+                    # 扩展beam
+                    for k in range(beam_size):
+                        candidate_seq = torch.cat([beam_seq, topk_indices[:, k:k+1]], dim=1)
+                        candidate_score = beam_score - topk_log_probs[:, k].item()  # 使用item()而不是mean()
+                        candidates.append((candidate_seq, candidate_score))
+                
+                # 选择最好的beam_size个候选
+                candidates.sort(key=lambda x: x[1])
+                beams = candidates[:beam_size]
+                
+                # 检查是否所有beam都生成了EOS
+                if all(beam_seq[0, -1].item() == eos_id for beam_seq, _ in beams):
+                    break
+            
+            # 将未完成的beam添加到final_beams
+            final_beams.extend(beams)
+            
+            # 选择得分最高的beam
+            final_beams.sort(key=lambda x: x[1])
+            best_beam = final_beams[0][0]  # 只取最好的一个beam
+            results.append(best_beam)  # 添加到结果列表
+        
+        return results

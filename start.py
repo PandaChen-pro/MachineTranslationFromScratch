@@ -137,9 +137,13 @@ def main():
         data_dir=args.data_dir
     )
 
+
     # 训练模式
     if args.mode == 'train':
         # 构建数据集
+        train_src, train_tgt = train_data
+        val_src, val_tgt = val_data
+        
         train_dataset = TranslationDataset(train_src, train_tgt, args.max_len)
         val_dataset = TranslationDataset(val_src, val_tgt, args.max_len)
 
@@ -212,6 +216,7 @@ def main():
         print(f"Target vocabulary size: {len(tgt_vocab)}")
 
         # 构建测试数据集
+        test_src, test_tgt = test_data
         test_dataset = TranslationDataset(test_src, test_tgt, args.max_len)
         test_batch_size = args.batch_size * 2  # 测试时可以用更大的批次
         test_loader = get_dataloader(test_dataset, test_batch_size, src_vocab, tgt_vocab)
