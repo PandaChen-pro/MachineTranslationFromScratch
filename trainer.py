@@ -1,103 +1,91 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-# from torch.optim.lr_scheduler import ReduceLROnPlateau # No longer used
-from torch.optim.lr_scheduler import LambdaLR # Import LambdaLR
 import time
 import wandb
 import os
 import json
-from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
+import math
+import sacrebleu
 from tqdm import tqdm
 import random
-import math # Import math
 
-# Assume util.py exists with these functions:
+# 导入工具函数
 from util import save_checkpoint, load_checkpoint
 
 class LabelSmoothingLoss(nn.Module):
     """
     实现标签平滑的损失函数
-    
-    Args:
-        size: 词汇表大小
-        padding_idx: 填充标记的索引，在计算损失时会被忽略
-        smoothing: 平滑参数，通常设置为0.1
     """
     def __init__(self, size, padding_idx, smoothing=0.1):
         super(LabelSmoothingLoss, self).__init__()
         self.criterion = nn.KLDivLoss(reduction='sum')
         self.padding_idx = padding_idx
-        self.confidence = 1.0 - smoothing  # 正确标签的置信度
-        self.smoothing = smoothing  # 分配给其他标签的概率
-        self.size = size  # 词汇表大小
+        self.confidence = 1.0 - smoothing
+        self.smoothing = smoothing
+        self.size = size
         self.true_dist = None
         
     def forward(self, x, target):
-        """
-        计算带标签平滑的损失
-        
-        Args:
-            x: 模型输出的logits，形状为 [batch_size * seq_len, vocab_size]
-            target: 目标索引，形状为 [batch_size * seq_len]
-            
-        Returns:
-            平滑后的KL散度损失
-        """
         assert x.size(1) == self.size
         true_dist = x.clone()
-        true_dist.fill_(self.smoothing / (self.size - 2))  # 将平滑概率均匀分配给所有非正确、非填充的标签
-        true_dist.scatter_(1, target.unsqueeze(1), self.confidence)  # 将confidence概率分配给正确标签
-        true_dist[:, self.padding_idx] = 0  # 填充标记不参与损失计算
+        true_dist.fill_(self.smoothing / (self.size - 2))
+        true_dist.scatter_(1, target.unsqueeze(1), self.confidence)
+        true_dist[:, self.padding_idx] = 0
         mask = (target == self.padding_idx)
-        true_dist.masked_fill_(mask.unsqueeze(1), 0.0)  # 将填充位置的所有概率设为0
+        true_dist.masked_fill_(mask.unsqueeze(1), 0.0)
         
-        # 保存true_dist用于调试
         self.true_dist = true_dist
         
-        # 对logits应用log_softmax，然后计算KL散度
         x = torch.log_softmax(x, dim=1)
         non_pad_count = target.numel() - mask.sum().item()
         return self.criterion(x, true_dist) / non_pad_count
 
-
-# --- Learning Rate Scheduler Function ---
-def get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps, last_epoch=-1):
+class NoamOpt:
     """
-    Creates a learning rate scheduler with linear warmup and linear decay.
+    Noam优化器实现，基于Transformer论文的学习率调度
     """
-    def lr_lambda(current_step: int):
-        if current_step < num_warmup_steps:
-            # Linear warmup
-            return float(current_step) / float(max(1, num_warmup_steps))
-        # Linear decay
-        return max(
-            0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps))
-        )
-
-    # Ensure optimizer is passed correctly
-    return LambdaLR(optimizer, lr_lambda, last_epoch)
-# ---
+    def __init__(self, model_size, factor=1, warmup=4000):
+        self.model_size = model_size
+        self.factor = factor
+        self.warmup = warmup
+        self.step_num = 0
+        self.optimizer = None
+        
+    def set_optimizer(self, optimizer):
+        self.optimizer = optimizer
+        
+    def step(self):
+        """更新参数并调整学习率"""
+        self.step_num += 1
+        for p in self.optimizer.param_groups:
+            p['lr'] = self.rate()
+        self.optimizer.step()
+        
+    def rate(self, step=None):
+        """计算Noam学习率"""
+        if step is None:
+            step = self.step_num
+        return self.factor * (self.model_size ** (-0.5) * 
+                              min(step ** (-0.5), step * self.warmup ** (-1.5)))
+        
+    def zero_grad(self):
+        """清除梯度"""
+        self.optimizer.zero_grad()
+        
+    def get_lr(self):
+        """获取当前学习率"""
+        return self.optimizer.param_groups[0]['lr']
 
 class Trainer:
     def __init__(self, model, train_loader, val_loader, src_vocab, tgt_vocab,
                  config, device, checkpoint_dir='checkpoints'):
         """
-        Initializes the Trainer.
-
-        Args:
-            model (nn.Module): The Transformer model.
-            train_loader (DataLoader): DataLoader for the training set.
-            val_loader (DataLoader): DataLoader for the validation/test set.
-            src_vocab (Vocabulary): Source language vocabulary.
-            tgt_vocab (Vocabulary): Target language vocabulary.
-            config (dict): Configuration dictionary containing hyperparameters.
-            device (torch.device): Device to run training on (e.g., 'cuda', 'cpu').
-            checkpoint_dir (str): Directory to save checkpoints.
+        初始化Trainer
         """
         self.model = model
         self.train_loader = train_loader
-        self.val_loader = val_loader # This will be validation loader in train mode, test loader in test mode
+        self.val_loader = val_loader
         self.src_vocab = src_vocab
         self.tgt_vocab = tgt_vocab
         self.config = config
@@ -106,16 +94,28 @@ class Trainer:
 
         os.makedirs(checkpoint_dir, exist_ok=True)
 
-        # --- Optimizer ---
-        self.optimizer = optim.Adam(
+        # --- 创建Noam优化器 ---
+        base_lr = config.get('learning_rate', 3e-4)
+        warmup_steps = config.get('warmup_steps', 4000)
+        
+        # 创建基础Adam优化器
+        self.base_optimizer = optim.Adam(
             model.parameters(),
-            lr=config['learning_rate'], # Base learning rate
+            lr=base_lr,
             betas=(0.9, 0.98),
             eps=1e-9,
             weight_decay=1e-4
         )
+        
+        # 创建Noam优化器包装器
+        self.optimizer = NoamOpt(
+            model_size=model.d_model,
+            factor=base_lr * (model.d_model ** -0.5),  # 依据论文计算factor
+            warmup=warmup_steps
+        )
+        self.optimizer.set_optimizer(self.base_optimizer)
 
-        # --- Loss Function ---
+        # --- 损失函数 ---
         smoothing = config.get('label_smoothing', 0.1)
         self.criterion = LabelSmoothingLoss(
             size=len(tgt_vocab),
@@ -123,50 +123,14 @@ class Trainer:
             smoothing=smoothing
         )
 
-        # --- Learning Rate Scheduler (Warmup + Decay) ---
-        self.scheduler = None # Initialize as None
-        self.num_training_steps = 0
-        self.num_warmup_steps = 0
-
-        # Setup scheduler only if in training mode (train_loader is provided)
-        if self.train_loader is not None:
-            # Calculate total training steps
-            # Ensure config contains 'epochs' and 'batch_size' or handle appropriately
-            if 'epochs' not in config or 'batch_size' not in config:
-                 print("Warning: 'epochs' or 'batch_size' not found in config. Cannot determine total training steps for scheduler.")
-            else:
-                try:
-                    # Estimate steps per epoch. Handle potential errors if train_loader is empty.
-                    num_update_steps_per_epoch = len(self.train_loader) if len(self.train_loader) > 0 else 1
-                    self.num_training_steps = num_update_steps_per_epoch * config['epochs']
-                    self.num_warmup_steps = config['warmup_steps']
-
-                    if self.num_training_steps <= 0:
-                         print(f"Warning: Calculated num_training_steps is {self.num_training_steps}. Scheduler might not work correctly.")
-
-                    # Create the scheduler
-                    self.scheduler = get_linear_schedule_with_warmup(
-                        self.optimizer,
-                        num_warmup_steps=self.num_warmup_steps,
-                        num_training_steps=self.num_training_steps
-                    )
-                    print(f"Scheduler created: Warmup steps={self.num_warmup_steps}, Total estimated steps={self.num_training_steps}")
-
-                except Exception as e:
-                    print(f"Error calculating training steps or creating scheduler: {e}")
-                    self.scheduler = None # Fallback to no scheduler if error occurs
-        else:
-             print("Running in test mode or train_loader not provided. Scheduler not created.")
-
-
-        # --- Training State ---
+        # --- 训练状态 ---
         self.start_epoch = 0
         self.best_bleu = 0.0
-        self.global_step = 0 # Tracks total training steps across epochs/resumes
+        self.global_step = 0
 
-        # --- wandb Configuration ---
-        self.use_wandb = config.get('use_wandb', False) # Default to False if not specified
-        self.wandb_run = None # Store wandb run object
+        # --- wandb配置 ---
+        self.use_wandb = config.get('use_wandb', False)
+        self.wandb_run = None
         if self.use_wandb:
             wandb_id_file = os.path.join(checkpoint_dir, 'wandb_id.json')
             resume_wandb_run = config.get('resume_wandb', False) and os.path.exists(wandb_id_file)
@@ -177,38 +141,37 @@ class Trainer:
                         wandb_data = json.load(f)
                     self.wandb_run = wandb.init(
                         project=config.get('wandb_project', 'nmt-transformer'),
-                        # name=config.get('wandb_name', 'zh-en-transformer'), # Name might not be needed if resuming by ID
                         id=wandb_data['id'],
                         resume="must",
-                        config=config # Update config in case parameters changed
+                        config=config
                     )
                     print(f"Resuming wandb run with id: {wandb_data['id']}")
                 except Exception as e:
                     print(f"Failed to resume wandb run: {e}. Initializing new run.")
-                    resume_wandb_run = False # Fallback to new run
+                    resume_wandb_run = False
 
-            if not resume_wandb_run: # If not resuming or resuming failed
+            if not resume_wandb_run:
                 try:
                     self.wandb_run = wandb.init(
                         project=config.get('wandb_project', 'nmt-transformer'),
                         name=config.get('wandb_name', 'zh-en-transformer'),
                         config=config
                     )
-                    # Save wandb run ID for potential future resuming
+                    # 保存wandb运行ID以便将来恢复
                     with open(wandb_id_file, 'w') as f:
                         json.dump({'id': self.wandb_run.id}, f)
                     print(f"Initialized new wandb run with id: {self.wandb_run.id}")
                 except Exception as e:
                     print(f"Failed to initialize wandb: {e}. Disabling wandb.")
-                    self.use_wandb = False # Disable wandb if init fails
+                    self.use_wandb = False
 
-            # Watch model if wandb run is active
+            # 监视模型（如果wandb运行处于活动状态）
             if self.use_wandb and self.wandb_run:
-                wandb.watch(model, log_freq=100) # Log gradients/parameters every 100 steps
+                wandb.watch(model, log_freq=100)
 
     def _train_epoch(self, epoch):
-        """Trains the model for one epoch."""
-        self.model.train() # Set model to training mode
+        """训练一个epoch"""
+        self.model.train()
         total_loss = 0
         start_time = time.time()
 
@@ -218,50 +181,42 @@ class Trainer:
             src = batch['src'].to(self.device)
             tgt = batch['tgt'].to(self.device)
 
-            # Prepare decoder input (excluding last token) and target output (excluding first token)
+            # 准备解码器输入和目标输出
             tgt_input = tgt[:, :-1]
             tgt_output = tgt[:, 1:]
 
-            # --- Forward pass ---
-            self.optimizer.zero_grad() # Zero gradients before forward pass
-            # Model internally creates masks based on padding and causality
+            # 前向传播
+            self.optimizer.zero_grad()
             outputs = self.model(src, tgt_input)
 
-            # --- Calculate loss ---
-            # Reshape for CrossEntropyLoss: (Batch * SeqLen, VocabSize), (Batch * SeqLen)
+            # 计算损失
             loss = self.criterion(outputs.view(-1, len(self.tgt_vocab)), tgt_output.reshape(-1))
 
             if torch.isnan(loss):
                 print(f"Warning: NaN loss detected at step {self.global_step}. Skipping update.")
-                # Consider stopping or adding more debugging here
-                continue # Skip backward/optimizer step if loss is NaN
+                continue
 
-            # --- Backward pass and Optimization ---
+            # 反向传播和优化
             loss.backward()
 
-            # Gradient Clipping
+            # 梯度裁剪
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['clip_grad'])
 
             self.optimizer.step()
 
-            # --- Update Learning Rate (Step-based Scheduler) ---
-            if self.scheduler:
-                 self.scheduler.step()
-
             total_loss += loss.item()
-            self.global_step += 1 # Increment global step counter
+            self.global_step += 1
 
-            # Update progress bar postfix
-            current_lr = self.optimizer.param_groups[0]['lr']
+            # 更新进度条后缀
+            current_lr = self.optimizer.get_lr()
             progress_bar.set_postfix({'loss': f"{loss.item():.4f}", 'lr': f"{current_lr:.6f}"})
 
-            # Log metrics to wandb periodically
-            if self.use_wandb and self.wandb_run and self.global_step % 100 == 0: # Log every 100 steps
+            # 定期记录指标到wandb
+            if self.use_wandb and self.wandb_run and self.global_step % 100 == 0:
                 wandb.log({
                     'step_train_loss': loss.item(),
                     'learning_rate': current_lr,
-                    # Log global_step directly if needed, wandb usually tracks its own step
-                }, step=self.global_step) # Use global_step as custom step counter
+                }, step=self.global_step)
 
         avg_loss = total_loss / len(self.train_loader) if len(self.train_loader) > 0 else 0
         elapsed_time = time.time() - start_time
@@ -269,187 +224,182 @@ class Trainer:
         return avg_loss
 
     def evaluate(self, fast_eval=False):
-        """Evaluates the model on the validation/test set."""
-        self.model.eval() # Set model to evaluation mode
+        """使用sacrebleu评估模型"""
+        self.model.eval()
         total_loss = 0
-        hypotheses = [] # List to store predicted token lists
-        references = [] # List to store reference token lists (list of lists)
+        hypotheses = []
+        references = []
 
-        # Determine if using fast evaluation based on method argument and config
+        # 确定是否使用快速评估
         use_fast_eval = self.config.get('fast_eval', False) and fast_eval
-        fast_eval_size = self.config.get('fast_eval_size', 1000) # Get size from config
+        fast_eval_size = self.config.get('fast_eval_size', 1000)
 
         num_batches_to_eval = len(self.val_loader)
         eval_desc = "Evaluating (Full)"
         if use_fast_eval:
-            if self.val_loader.batch_size and self.val_loader.batch_size > 0 :
-                 # Calculate batches needed, ensure at least 1 batch
-                 num_batches_to_eval = max(1, math.ceil(fast_eval_size / self.val_loader.batch_size))
-                 eval_desc = f"Evaluating (Fast ~{fast_eval_size} samples / {num_batches_to_eval} batches)"
+            if self.val_loader.batch_size and self.val_loader.batch_size > 0:
+                num_batches_to_eval = max(1, math.ceil(fast_eval_size / self.val_loader.batch_size))
+                eval_desc = f"Evaluating (Fast ~{fast_eval_size} samples / {num_batches_to_eval} batches)"
             else:
-                 print("Warning: Cannot determine batch size for fast evaluation. Evaluating all batches.")
-                 num_batches_to_eval = len(self.val_loader) # Fallback to full eval
+                print("Warning: Cannot determine batch size for fast evaluation. Evaluating all batches.")
+                num_batches_to_eval = len(self.val_loader)
 
-
-        with torch.no_grad(): # Disable gradient calculations
+        with torch.no_grad():
             for i, batch in enumerate(tqdm(self.val_loader, desc=eval_desc, leave=False)):
-                if i >= num_batches_to_eval: # Stop if limit reached (for fast_eval or full eval)
+                if i >= num_batches_to_eval:
                     break
 
                 src = batch['src'].to(self.device)
-                tgt = batch['tgt'].to(self.device) # Target needed for loss and reference
+                tgt = batch['tgt'].to(self.device)
 
-                # Calculate Loss
+                # 计算损失
                 tgt_input = tgt[:, :-1]
                 tgt_output = tgt[:, 1:]
-                outputs = self.model(src, tgt_input) # Forward pass
+                outputs = self.model(src, tgt_input)
                 loss = self.criterion(outputs.view(-1, len(self.tgt_vocab)), tgt_output.reshape(-1))
 
-                if not torch.isnan(loss): # Avoid adding NaN loss
+                if not torch.isnan(loss):
                     total_loss += loss.item()
                 else:
                     print(f"Warning: NaN loss detected during evaluation batch {i}. Skipping batch loss.")
 
-
-                # --- Generate Translations ---
+                # 生成翻译
                 use_beam = self.config.get('use_beam_search', False)
                 max_len = self.config.get('max_len', 100)
                 beam_size = self.config.get('beam_size', 5)
 
                 if use_beam:
-                    # Ensure src_padding_mask is implicitly handled or passed if needed by beam_search implementation
-                    translated_ids = self.model.beam_search(src, max_len=max_len, beam_size=beam_size)
+                    translated_ids = self.model.beam_search(
+                        src, 
+                        max_len=max_len, 
+                        beam_size=beam_size,
+                        length_penalty=self.config.get('length_penalty', 1.0)
+                    )
                 else:
-                    # Ensure src_padding_mask is implicitly handled or passed if needed by greedy_decode implementation
                     translated_ids = self.model.greedy_decode(src, max_len=max_len)
 
-                # --- Decode and Prepare for BLEU ---
+                # 解码并准备BLEU计算
                 for j in range(translated_ids.size(0)):
-                    # Decode hypothesis (prediction)
-                    hyp_tokens = self.tgt_vocab.decode(translated_ids[j], skip_special_tokens=True).split()
-                    # Decode reference (ground truth)
-                    ref_tokens = self.tgt_vocab.decode(tgt[j], skip_special_tokens=True).split()
+                    # 解码假设（预测）
+                    hyp_text = self.tgt_vocab.decode(translated_ids[j], skip_special_tokens=True)
+                    # 解码参考（地面真相）
+                    ref_text = self.tgt_vocab.decode(tgt[j], skip_special_tokens=True)
 
-                    hypotheses.append(hyp_tokens)
-                    references.append([ref_tokens]) # NLTK expects list of references per hypothesis
+                    hypotheses.append(hyp_text)
+                    references.append(ref_text)
 
-        # --- Calculate BLEU Score ---
+        # 使用sacrebleu计算BLEU分数
         bleu = 0.0
         if hypotheses and references:
-             # Use method1 smoothing, suitable for sentence-level evaluation and shorter sentences
-            smoothie = SmoothingFunction().method1
             try:
-                bleu = corpus_bleu(references, hypotheses, weights=(0.25, 0.25, 0.25, 0.25), smoothing_function=smoothie)
-            except ZeroDivisionError:
-                print("Warning: Division by zero encountered in BLEU calculation. Setting BLEU to 0.")
-                bleu = 0.0 # Handle potential division by zero
+                # 使用sacrebleu计算BLEU-4分数
+                bleu_score = sacrebleu.corpus_bleu(
+                    hypotheses, 
+                    [references], 
+                    tokenize='13a',  # 使用标准的BLEU分词器13a
+                    lowercase=True  # 转换为小写以保持一致性
+                )
+                bleu = bleu_score.score / 100.0  # sacrebleu返回的是0-100范围内的分数，我们转换为0-1
             except Exception as e:
-                 print(f"An error occurred during BLEU calculation: {e}. Setting BLEU to 0.")
-                 bleu = 0.0
+                print(f"Error in BLEU calculation: {e}")
+                bleu = 0.0
         else:
-             print("Warning: No hypotheses or references generated for BLEU calculation.")
+            print("Warning: No hypotheses or references generated for BLEU calculation.")
 
         avg_loss = total_loss / num_batches_to_eval if num_batches_to_eval > 0 else 0
 
-        # --- Save Checkpoints (only in training mode, implicitly checked by `self.train_loader is not None` during init?) ---
-        # We only save checkpoints if we are actually training
+        # 保存检查点（仅在训练模式下）
         if self.train_loader is not None:
-             current_epoch = getattr(self, 'epoch_count', self.start_epoch) # Get current epoch if available
-             is_best = bleu > self.best_bleu
-             if is_best:
-                 self.best_bleu = bleu
-                 # Save best model checkpoint
-                 save_checkpoint({
-                     'epoch': current_epoch,
-                     'global_step': self.global_step,
-                     'model_state_dict': self.model.state_dict(),
-                     'optimizer_state_dict': self.optimizer.state_dict(),
-                     'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None, # Save scheduler state
-                     'best_bleu': self.best_bleu,
-                     # Avoid saving vocab in checkpoint if loaded separately
-                     # 'src_vocab': self.src_vocab,
-                     # 'tgt_vocab': self.tgt_vocab
-                 }, True, self.checkpoint_dir, filename='best_model.pt')
-                 print(f"New best model saved with BLEU: {self.best_bleu:.4f}")
+            current_epoch = getattr(self, 'epoch_count', self.start_epoch)
+            is_best = bleu > self.best_bleu
+            if is_best:
+                self.best_bleu = bleu
+                save_checkpoint({
+                    'epoch': current_epoch,
+                    'global_step': self.global_step,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.base_optimizer.state_dict(),
+                    'best_bleu': self.best_bleu,
+                }, True, self.checkpoint_dir, filename='best_model.pt')
+                print(f"New best model saved with BLEU: {self.best_bleu:.4f}")
 
-             # Save latest checkpoint (always, for resuming)
-             save_checkpoint({
-                 'epoch': current_epoch,
-                 'global_step': self.global_step,
-                 'model_state_dict': self.model.state_dict(),
-                 'optimizer_state_dict': self.optimizer.state_dict(),
-                 'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None, # Save scheduler state
-                 'best_bleu': self.best_bleu, # Save current best BLEU in latest checkpoint too
-                 # 'src_vocab': self.src_vocab,
-                 # 'tgt_vocab': self.tgt_vocab
-             }, False, self.checkpoint_dir, filename='checkpoint.pt')
-        # --- End Checkpoint Saving ---
+            # 始终保存最新的检查点（用于恢复）
+            save_checkpoint({
+                'epoch': current_epoch,
+                'global_step': self.global_step,
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': self.base_optimizer.state_dict(),
+                'best_bleu': self.best_bleu,
+            }, False, self.checkpoint_dir, filename='checkpoint.pt')
 
         return avg_loss, bleu
 
     def train(self, epochs):
-        """Main training loop."""
-        # Load checkpoint if resuming training
+        """主训练循环"""
+        # 如果恢复训练，则加载检查点
         if self.config.get('resume_training', False):
-            self._load_checkpoint() # Load model, optimizer, scheduler, epoch, step, best_bleu
+            self._load_checkpoint()
 
         print(f"Starting training from Epoch {self.start_epoch + 1}...")
 
         for epoch in range(self.start_epoch, epochs):
-            self.epoch_count = epoch + 1 # Track current epoch number for saving
+            self.epoch_count = epoch + 1
 
-            # --- Train for one epoch ---
+            # 训练一个epoch
             train_loss = self._train_epoch(epoch)
 
-            # --- Evaluate on validation set ---
-            # Use fast_eval setting from config
+            # 在验证集上评估
             val_loss, bleu = self.evaluate(fast_eval=self.config.get('fast_eval', False))
 
-            # --- Log Metrics ---
+            # 记录指标
             log_data = {
                 'epoch': epoch + 1,
                 'train_loss': train_loss,
                 'val_loss': val_loss,
-                'val_bleu': bleu, # Use a distinct name like val_bleu
-                'learning_rate': self.optimizer.param_groups[0]['lr'], # Log current LR
-                'best_val_bleu': self.best_bleu, # Log historical best BLEU
-                # global_step is logged periodically in _train_epoch
+                'val_bleu': bleu,
+                'learning_rate': self.optimizer.get_lr(),
+                'best_val_bleu': self.best_bleu,
             }
             if self.use_wandb and self.wandb_run:
-                 wandb.log(log_data) # Log per epoch results
+                wandb.log(log_data)
 
             print(f"Epoch {epoch+1}/{epochs} Completed. Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val BLEU: {bleu:.4f}, Best Val BLEU: {self.best_bleu:.4f}")
 
-            # --- Optional: Early Stopping Logic ---
-            # Add logic here based on validation BLEU not improving for N epochs if desired
-
-        # --- Finish wandb run after training loop ---
+        # 训练循环结束后结束wandb运行
         if self.use_wandb and self.wandb_run:
             print("Finishing wandb run...")
             wandb.finish()
 
     def _load_checkpoint(self):
-        """Loads checkpoint to resume training."""
+        """加载检查点以恢复训练"""
         checkpoint_path = os.path.join(self.checkpoint_dir, 'checkpoint.pt')
         if os.path.exists(checkpoint_path):
             print(f"Loading checkpoint from {checkpoint_path}")
-            # Pass the scheduler to load its state as well
-            checkpoint = load_checkpoint(checkpoint_path, self.model, self.optimizer, self.scheduler, self.device)
-            if checkpoint:
-                # Load states from the returned checkpoint dictionary
-                self.start_epoch = checkpoint.get('epoch', 0) # Get epoch, default to 0 if not found
-                self.best_bleu = checkpoint.get('best_bleu', 0.0)
-                self.global_step = checkpoint.get('global_step', 0)
-
-                # Optimizer and scheduler states are loaded within load_checkpoint util function
-                print(f"Resuming training from Epoch {self.start_epoch + 1}, Global Step: {self.global_step}, Best BLEU: {self.best_bleu:.4f}")
-            else:
-                print("Checkpoint loading failed (load_checkpoint returned None). Starting from scratch.")
-                self.start_epoch = 0 # Ensure starting from scratch if loading fails
-                self.best_bleu = 0.0
-                self.global_step = 0
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            
+            # 加载模型状态
+            if 'model_state_dict' in checkpoint:
+                state_dict = checkpoint['model_state_dict']
+                # 处理多GPU训练保存的模型
+                if list(state_dict.keys())[0].startswith('module.'):
+                    state_dict = {k[len("module."):]: v for k, v in state_dict.items()}
+                self.model.load_state_dict(state_dict)
+            
+            # 加载优化器状态
+            if 'optimizer_state_dict' in checkpoint and self.base_optimizer:
+                try:
+                    self.base_optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                except Exception as e:
+                    print(f"Warning: Failed to load optimizer state: {e}")
+            
+            # 加载训练状态
+            self.start_epoch = checkpoint.get('epoch', 0) + 1  # 下一个epoch
+            self.best_bleu = checkpoint.get('best_bleu', 0.0)
+            self.global_step = checkpoint.get('global_step', 0)
+            
+            print(f"Resuming training from Epoch {self.start_epoch}, Global Step: {self.global_step}, Best BLEU: {self.best_bleu:.4f}")
         else:
-            print("No checkpoint found at {checkpoint_path}. Starting training from scratch.")
+            print(f"No checkpoint found at {checkpoint_path}. Starting training from scratch.")
             self.start_epoch = 0
             self.best_bleu = 0.0
             self.global_step = 0
