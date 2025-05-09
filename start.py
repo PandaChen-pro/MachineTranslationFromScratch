@@ -49,7 +49,7 @@ def parse_args():
     parser.add_argument('--label_smoothing', type=float, default=0.1, help='标签平滑系数')
 
     # --- 推理相关 ---
-    parser.add_argument('--beam_size', type=int, default=3, help='束搜索宽度')
+    parser.add_argument('--beam_size', type=int, default=5, help='束搜索宽度')
     parser.add_argument('--use_beam_search', action='store_true', help='使用束搜索进行解码')
     parser.add_argument('--length_penalty', type=float, default=1.0, help='束搜索长度惩罚')
     parser.add_argument('--fast_eval', action='store_true', help='使用快速评估模式')

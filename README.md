@@ -5,25 +5,22 @@ tar -xzf /data/coding/MachineTranslationFromScratch/data/sample.tar.gz
 ```
 ## 训练模型
 ```shell
-python start.py --mode train --train_src chinese.txt --train_tgt english.txt --val_src Niu.dev.txt --val_tgt Niu.dev.reference --use_wandb --wandb_project nmt-zh-en
+python start.py --mode train --use_wandb
 ```
+推荐使用快速评估🛠️：
 ```shell
-python start.py --mode train --src_file ./data/chinese.txt --tgt_file ./data/english.txt --use_wandb --use_beam_search
-```
-快速评估：
-```shell
-python start.py --mode train --fast_eval --use_wandb
-python start.py --mode train --fast_eval --fast_eval_size 100
+python start.py --mode train  --use_wandb --fast_eval
 ```
 ## 恢复中断训练
 ```shell
-python start.py --mode train --resume_training --resume_wandb
-```
-快速评估：
-```shell
-python start.py --mode train --resume_training --resume_wandb --fast_eval --use_wandb
+python start.py --mode train --resume_training --resume_wandb 
 ```
 ## 测试集上评估
 ```shell
-python start.py --mode test --test_src Niu.test.txt --test_tgt Niu.test.reference
+python start.py --mode test --use_beam_search
 ```
+模型下载链接：https://drive.google.com/file/d/1NFsf_vvMs3V_D7nfhUZf9TBxPDbM8Lg6/view?usp=sharing
+
+Greedy Search BLEU4:14.4061
+
+Beam Search BLEU4（beam size=3）: Test Loss: 2.1525, Test BLEU-4: 22.1030 (36minutes)
